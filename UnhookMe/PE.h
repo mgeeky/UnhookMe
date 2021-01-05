@@ -9,13 +9,19 @@
 #include <algorithm>
 #include <cctype>
 #include <string>
+#include <sstream>
 #include <winnt.h>
 #include <tlhelp32.h>
 #include <winternl.h>
 #include <psapi.h>
 #include <processthreadsapi.h>
 
-
+#ifdef _MSC_VER
+// Microsoft Visual Studio Compiler
+#    pragma warning(disable:4996)
+#    pragma warning(disable:4309)
+#    pragma warning(disable:4244)
+#endif
 
 ///////////////////////////////////
 
@@ -197,6 +203,10 @@ public:
     HANDLE                              hFileHandle;
 
     // Process analysis specific variables
+    bool                                bPreferBaseAddressThanImageBase;
+                                                                    // If parsing PIC injected shellcode, its allocation
+                                                                    // base address may be different than its expected ImageBase.
+                                                                    // In such scenario, prefer allocation base over its ImageBase.
     bool                                bMemoryAnalysis;            // PE interface is performing living
                                                                     // process/module analysis (memory).
                                                                     // This not flags actual memory
@@ -209,25 +219,25 @@ public:
 
     //////////////////////////////        MEMBER METHODS        ////////////////////////////////////////////
 
+    ~PE();
 
     // Implicit constructor. After you have to call PE::LoadFile member method to analyse an image
     PE()
     {
-        _bHasOverlay = _bIsFileMapped = _bIsIATFilled = bUseRVAInsteadOfRAW = bMemoryAnalysis = _selfProcessAnalysis = false;
-        numOfNewSections = sizeOfFile = _dwCurrentOffset = numberOfImports = _dwLastError = dwPID = 0;
-        _hMapOfFile = hFileHandle = (HANDLE)INVALID_HANDLE_VALUE;
-        lpDOSStub = lpMapOfFile = nullptr;
+        _initVars();
     }
 
     // Explicit constructor. After initialization instantly runs PE image analysis
     PE(const std::string& _szFileName, bool bRunAnalysis = false) : szFileName(_szFileName)
     {
-        PE();
+        _initVars();
         if (bRunAnalysis == true) {
             _bIsFileMapped = false;
             LoadFile();
         }
     }
+
+    void close();
 
     bool isArch86() const { return bIs86; }
 
@@ -258,6 +268,17 @@ public:
     //=========     Checking errors
 
     DWORD GetError()                                const { return _dwLastError; }
+    DWORD GetErrorLine()                            const { return _dwErrorLine; }
+    std::wstring GetErrorFunc()                     const { std::wstring func(_szErrorFunction.begin(), _szErrorFunction.end()); return func; }
+    std::wstring GetErrorString()                   const 
+    { 
+        std::wostringstream woss;
+        std::wstring func(_szErrorFunction.begin(), _szErrorFunction.end());
+        woss << L"(0x" << std::hex << _dwLastError << L", " << std::dec << _dwErrorLine << L", " << func << L")";
+        std::wstring out(woss.str());
+        return out;
+    }
+
     bool operator!()                                const { return ((this->GetError() != 0) ? true : false); }
     void SetError(DWORD dwErrCode) { SetLastError(dwErrCode); _dwLastError = dwErrCode; }
 
@@ -268,7 +289,6 @@ public:
         this->_dwErrorLine = (DWORD)iLine;
         this->_szErrorFunction = std::string(szFunc);
     }
-
 
     //===========    Analysis methods    ============
 
@@ -294,6 +314,13 @@ public:
     // divided to sections. This means, that analysis must be RVA-based
     // and make file reading & writing on every I/O.
     // e.g. dump file may be a dumped process memory.
+	// Simple file reading & writing (and of course parsing)
+	bool AnalyseDump(const std::wstring& _szDump, bool readOnly)
+	{
+		std::string _name(_szDump.begin(), _szDump.end());
+		return AnalyseDump(_name, readOnly);
+	}
+
     bool AnalyseDump(const std::string& _szDump, bool readOnly)
     {
         this->bUseRVAInsteadOfRAW = this->bIsValidPE = true;
@@ -308,21 +335,11 @@ public:
     // Analyses current process memory treating input dwAddress as a base of
     // mapped image. This address should point to the mapped address of valid PE
     // file inside current process memory.
-    bool AnalyseMemory(LPBYTE dwAddress, bool readOnly)
-    {
-        this->bUseRVAInsteadOfRAW = this->bIsValidPE =
-            this->_bIsFileMapped = this->bMemoryAnalysis = true;
-        this->lpMapOfFile = dwAddress;
-        this->_bAutoMapOfFile = false;
-        this->bReadOnly = readOnly;
-
-        char fileName[MAX_PATH] = { 0 };
-        strncpy_s(fileName, MAX_PATH, szFileName.c_str(), MAX_PATH);
-
-        GetModuleFileNameA(GetModuleHandle(nullptr), fileName, sizeof szFileName);
-
-        return PE::LoadFile();
-    }
+    // If analysed memory region is not a MEM_MAPPED or MEM_IMAGE, it may be PIC shellcode.
+    // In such case, prefer dwAddress over expected ImageBase while calculating RVAs/VAs.
+    // use isMapped=True if you plan to analyse memory mapped(or ordinarly loaded) PE module such as EXE/DLL,
+    // or isMapped=False for PIC shellcode acting as a Reflective DLL injected one or PE-to-shellcode converted.
+    bool AnalyseMemory(DWORD dwPID, LPBYTE dwAddress, size_t dwSize, bool readOnly, bool isMapped);
 
     // Below methods performs module analysis from specified process memory.
     // This works by reading process memory and parsing/analysing it.
@@ -373,42 +390,6 @@ public:
     // Creates image section and appends it to the PE::pSectionHdrs table
     __IMAGE_SECTION_HEADER CreateSection(DWORD dwSizeOfSection, DWORD dwDesiredAccess, const std::string& szNameOfSection);
 
-    ~PE()
-    {
-        if (_bAutoMapOfFile && _bIsFileMapped)
-        {
-            if (lpMapOfFile != nullptr)
-            {
-                UnmapViewOfFile(lpMapOfFile);
-                _bIsFileMapped = false;
-            }
-
-            if (_hMapOfFile != (HANDLE)INVALID_HANDLE_VALUE && _hMapOfFile != nullptr)
-            {
-                CloseHandle(_hMapOfFile);
-                _hMapOfFile = INVALID_HANDLE_VALUE;
-                _bAutoMapOfFile = false;
-            }
-        }
-
-        if (this->bMemoryAnalysis && this->lpMapOfFile != nullptr)
-        {
-            VirtualFree(this->lpMapOfFile, sizeOfFile + 1, MEM_DECOMMIT | MEM_FREE | MEM_RELEASE);
-        }
-
-        if (hFileHandle != INVALID_HANDLE_VALUE && hFileHandle != nullptr)
-        {
-            CloseHandle(hFileHandle);
-        }
-
-        hFileHandle = INVALID_HANDLE_VALUE;
-
-        if (this->bIsValidPE)
-        {
-            if (lpDOSStub != nullptr) free(lpDOSStub);
-        }
-    }
-
     static int64_t LECharTo64bitNum(char a[]) {
         int64_t n = 0;
         n = (((int64_t)a[7] << 56) & 0xFF00000000000000U)
@@ -452,6 +433,14 @@ public:
 private:
     // ==========================================
 
+	void _initVars()
+	{
+		_bHasOverlay = _bIsFileMapped = _bIsIATFilled = bUseRVAInsteadOfRAW = bMemoryAnalysis = _selfProcessAnalysis = false;
+		numOfNewSections = sizeOfFile = _dwCurrentOffset = numberOfImports = _dwLastError = dwPID = 0;
+		_hMapOfFile = hFileHandle = (HANDLE)INVALID_HANDLE_VALUE;
+		lpDOSStub = lpMapOfFile = nullptr;
+	}
+
     std::string& trimQuote(std::string& szPath) const;    // Trims from file path quote chars '"'
 
     bool ReadEntireModuleSafely(LPVOID lpBuffer, size_t dwSize, size_t dwOffset);
@@ -463,7 +452,7 @@ private:
     bool _OpenFile();
 
 
-    void    SetFileMapped(LPBYTE _lpMapOfFile) {
+    void SetFileMapped(LPBYTE _lpMapOfFile) {
         lpMapOfFile = _lpMapOfFile; _bIsFileMapped = true;
         _bAutoMapOfFile = false;
     }
@@ -486,8 +475,8 @@ private:
     // Returns char intepretation of input, or '.' if it is not printable
     inline char _HexChar(int c);
 
-    DWORD       GetIB32()  const { return imgNtHdrs32.OptionalHeader.ImageBase; }
-    ULONGLONG   GetIB64()  const { return imgNtHdrs64.OptionalHeader.ImageBase; }
+    DWORD       GetIB32()  const;
+    ULONGLONG   GetIB64()  const;
 
     bool        changeProtection(LPVOID address, size_t size, DWORD newProtection, LPDWORD oldProtection);
 

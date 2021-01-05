@@ -4,6 +4,7 @@
 #include <winternl.h>
 #include <wininet.h>
 #include <tlhelp32.h>
+#include <Wincrypt.h>
 #include <objidl.h>
 #include <WTypes.h>
 #include <unknwn.h>
@@ -11,213 +12,19 @@
 #include <lmjoin.h>
 #include <DsRole.h>
 #include <SetupAPI.h>
+#include <compressapi.h>
 
 namespace {
 
-    namespace MyDefs {
-
-        typedef enum _SYSTEM_INFORMATION_CLASS
-        {
-            SystemBasicInformation = 0,
-            SystemProcessorInformation = 1,             // obsolete...delete
-            SystemPerformanceInformation = 2,
-            SystemTimeOfDayInformation = 3,
-            SystemPathInformation = 4,
-            SystemProcessInformation = 5,
-            SystemCallCountInformation = 6,
-            SystemDeviceInformation = 7,
-            SystemProcessorPerformanceInformation = 8,
-            SystemFlagsInformation = 9,
-            SystemCallTimeInformation = 10,
-            SystemModuleInformation = 11,
-            SystemLocksInformation = 12,
-            SystemStackTraceInformation = 13,
-            SystemPagedPoolInformation = 14,
-            SystemNonPagedPoolInformation = 15,
-            SystemHandleInformation = 16,
-            SystemObjectInformation = 17,
-            SystemPageFileInformation = 18,
-            SystemVdmInstemulInformation = 19,
-            SystemVdmBopInformation = 20,
-            SystemFileCacheInformation = 21,
-            SystemPoolTagInformation = 22,
-            SystemInterruptInformation = 23,
-            SystemDpcBehaviorInformation = 24,
-            SystemFullMemoryInformation = 25,
-            SystemLoadGdiDriverInformation = 26,
-            SystemUnloadGdiDriverInformation = 27,
-            SystemTimeAdjustmentInformation = 28,
-            SystemSummaryMemoryInformation = 29,
-            SystemMirrorMemoryInformation = 30,
-            SystemPerformanceTraceInformation = 31,
-            SystemObsolete0 = 32,
-            SystemExceptionInformation = 33,
-            SystemCrashDumpStateInformation = 34,
-            SystemKernelDebuggerInformation = 35,
-            SystemContextSwitchInformation = 36,
-            SystemRegistryQuotaInformation = 37,
-            SystemExtendServiceTableInformation = 38,
-            SystemPrioritySeperation = 39,
-            SystemVerifierAddDriverInformation = 40,
-            SystemVerifierRemoveDriverInformation = 41,
-            SystemProcessorIdleInformation = 42,
-            SystemLegacyDriverInformation = 43,
-            SystemCurrentTimeZoneInformation = 44,
-            SystemLookasideInformation = 45,
-            SystemTimeSlipNotification = 46,
-            SystemSessionCreate = 47,
-            SystemSessionDetach = 48,
-            SystemSessionInformation = 49,
-            SystemRangeStartInformation = 50,
-            SystemVerifierInformation = 51,
-            SystemVerifierThunkExtend = 52,
-            SystemSessionProcessInformation = 53,
-            SystemLoadGdiDriverInSystemSpace = 54,
-            SystemNumaProcessorMap = 55,
-            SystemPrefetcherInformation = 56,
-            SystemExtendedProcessInformation = 57,
-            SystemRecommendedSharedDataAlignment = 58,
-            SystemComPlusPackage = 59,
-            SystemNumaAvailableMemory = 60,
-            SystemProcessorPowerInformation = 61,
-            SystemEmulationBasicInformation = 62,
-            SystemEmulationProcessorInformation = 63,
-            SystemExtendedHandleInformation = 64,
-            SystemLostDelayedWriteInformation = 65,
-            SystemBigPoolInformation = 66,
-            SystemSessionPoolTagInformation = 67,
-            SystemSessionMappedViewInformation = 68,
-            SystemHotpatchInformation = 69,
-            SystemObjectSecurityMode = 70,
-            SystemWatchdogTimerHandler = 71,
-            SystemWatchdogTimerInformation = 72,
-            SystemLogicalProcessorInformation = 73,
-            SystemWow64SharedInformation = 74,
-            SystemRegisterFirmwareTableInformationHandler = 75,
-            SystemFirmwareTableInformation = 76,
-            SystemModuleInformationEx = 77,
-            SystemVerifierTriageInformation = 78,
-            SystemSuperfetchInformation = 79,
-            SystemMemoryListInformation = 80,
-            SystemFileCacheInformationEx = 81,
-            MaxSystemInfoClass = 82  // MaxSystemInfoClass should always be the last enum
-        } SYSTEM_INFORMATION_CLASS;
-
-
-        enum KWAIT_REASON
-        {
-            Executive,
-            FreePage,
-            PageIn,
-            PoolAllocation,
-            DelayExecution,
-            Suspended,
-            UserRequest,
-            WrExecutive,
-            WrFreePage,
-            WrPageIn,
-            WrPoolAllocation,
-            WrDelayExecution,
-            WrSuspended,
-            WrUserRequest,
-            WrEventPair,
-            WrQueue,
-            WrLpcReceive,
-            WrLpcReply,
-            WrVirtualMemory,
-            WrPageOut,
-            WrRendezvous,
-            Spare2,
-            Spare3,
-            Spare4,
-            Spare5,
-            Spare6,
-            WrKernel,
-            MaximumWaitReason
-        };
-
-        enum THREAD_STATE
-        {
-            Running = 2,
-            Waiting = 5,
-        };
-
-#pragma pack(push,8)
-
-        struct CLIENT_ID
-        {
-            HANDLE UniqueProcess; // Process ID
-            HANDLE UniqueThread;  // Thread ID
-        };
-
-        // http://www.geoffchappell.com/studies/windows/km/ntoskrnl/api/ex/sysinfo/thread.htm
-        // Size = 0x40 for Win32
-        // Size = 0x50 for Win64
-        struct SYSTEM_THREAD
-        {
-            LARGE_INTEGER KernelTime;
-            LARGE_INTEGER UserTime;
-            LARGE_INTEGER CreateTime;
-            ULONG         WaitTime;
-            PVOID         StartAddress;
-            CLIENT_ID     ClientID;           // process/thread ids
-            LONG          Priority;
-            LONG          BasePriority;
-            ULONG         ContextSwitches;
-            THREAD_STATE  ThreadState;
-            KWAIT_REASON  WaitReason;
-        };
-
-        struct VM_COUNTERS // virtual memory of process
-        {
-            ULONG_PTR PeakVirtualSize;
-            ULONG_PTR VirtualSize;
-            ULONG     PageFaultCount;
-            ULONG_PTR PeakWorkingSetSize;
-            ULONG_PTR WorkingSetSize;
-            ULONG_PTR QuotaPeakPagedPoolUsage;
-            ULONG_PTR QuotaPagedPoolUsage;
-            ULONG_PTR QuotaPeakNonPagedPoolUsage;
-            ULONG_PTR QuotaNonPagedPoolUsage;
-            ULONG_PTR PagefileUsage;
-            ULONG_PTR PeakPagefileUsage;
-        };
-
-        // http://www.geoffchappell.com/studies/windows/km/ntoskrnl/api/ex/sysinfo/process.htm
-        // See also SYSTEM_PROCESS_INROMATION in Winternl.h
-        // Size = 0x00B8 for Win32
-        // Size = 0x0100 for Win64
-        struct SYSTEM_PROCESS
-        {
-            ULONG          NextEntryOffset; // relative offset
-            ULONG          ThreadCount;
-            LARGE_INTEGER  WorkingSetPrivateSize;
-            ULONG          HardFaultCount;
-            ULONG          NumberOfThreadsHighWatermark;
-            ULONGLONG      CycleTime;
-            LARGE_INTEGER  CreateTime;
-            LARGE_INTEGER  UserTime;
-            LARGE_INTEGER  KernelTime;
-            UNICODE_STRING ImageName;
-            LONG           BasePriority;
-            PVOID          UniqueProcessId;
-            PVOID          InheritedFromUniqueProcessId;
-            ULONG          HandleCount;
-            ULONG          SessionId;
-            ULONG_PTR      UniqueProcessKey;
-            VM_COUNTERS    VmCounters;
-            ULONG_PTR      PrivatePageCount;
-            IO_COUNTERS    IoCounters;   // defined in winnt.h
-        };
-
-#pragma pack(pop)
-
-    }
-
-    typedef struct _STARTUPINFOEX {
-        STARTUPINFO StartupInfo;
-        PPROC_THREAD_ATTRIBUTE_LIST lpAttributeList;
-    } STARTUPINFOEX, *LPSTARTUPINFOEX;
+    //
+    // This is how we specify API type definition for use with RESOLVE(...)
+    //
+	using fn_MessageBoxW = int WINAPI(
+		HWND    hWnd,
+		LPCWSTR lpText,
+		LPCWSTR lpCaption,
+		UINT    uType
+	);
 
     using fn_NtOpenProcess = NTSTATUS NTAPI(
         PHANDLE            ProcessHandle,
@@ -283,6 +90,27 @@ namespace {
         PVOID ApcRoutineContext,
         PVOID ApcStatusBlock,
         PVOID ApcReserved
+    );
+
+    using fn_CreateEventW = HANDLE WINAPI(
+        LPSECURITY_ATTRIBUTES lpEventAttributes,
+        BOOL                  bManualReset,
+        BOOL                  bInitialState,
+        LPCWSTR               lpName
+    );
+
+    using fn_Sleep = void WINAPI(
+        DWORD dwMilliseconds
+    );
+
+    using fn_RegisterServiceCtrlHandlerW = SERVICE_STATUS_HANDLE WINAPI(
+        LPCWSTR            lpServiceName,
+        LPHANDLER_FUNCTION lpHandlerProc
+    );
+
+    using fn_SetServiceStatus = BOOL WINAPI(
+        SERVICE_STATUS_HANDLE hServiceStatus,
+        LPSERVICE_STATUS      lpServiceStatus
     );
 
     using fn_WriteFile = BOOL WINAPI(
@@ -858,6 +686,13 @@ namespace {
         DWORD     dwOptionalLength
     );
 
+    using fn_InternetQueryDataAvailable = BOOL WINAPI(
+        HINTERNET hFile,
+        LPDWORD   lpdwNumberOfBytesAvailable,
+        DWORD     dwFlags,
+        DWORD_PTR dwContext
+    );
+
     using fn_InternetReadFile = BOOL WINAPI(
         HANDLE    hFile,
         LPVOID    lpBuffer,
@@ -1264,41 +1099,131 @@ namespace {
         LPDWORD                 lpThreadId
     );
 
-    using fn_MessageBoxW = int WINAPI(
-        HWND    hWnd,
-        LPCWSTR lpText,
-        LPCWSTR lpCaption,
-        UINT    uType
+     using fn_EtwEventWrite = ULONG WINAPI(
+         HANDLE RegHandle,
+         void* EventDescriptor,
+         ULONG UserDataCount,
+         void* UserData
+     );
+
+     using fn_ExpandEnvironmentStringsW = DWORD WINAPI(
+         const wchar_t* lpSrc,
+         wchar_t*       lpDst,
+         DWORD          nSize
+     );
+
+	 using fn_CryptAcquireContextW = BOOL WINAPI(
+		 HCRYPTPROV* phProv,
+		 LPCWSTR    szContainer,
+		 LPCWSTR    szProvider,
+		 DWORD      dwProvType,
+		 DWORD      dwFlags
+	 );
+
+     using fn_CryptAcquireContextA = BOOL WINAPI(
+		 HCRYPTPROV* phProv,
+		 LPCSTR     szContainer,
+		 LPCSTR     szProvider,
+		 DWORD      dwProvType,
+		 DWORD      dwFlags
+	 );
+
+     using fn_CryptImportKey = BOOL WINAPI(
+		 HCRYPTPROV hProv,
+		 const BYTE* pbData,
+		 DWORD      dwDataLen,
+		 HCRYPTKEY  hPubKey,
+		 DWORD      dwFlags,
+		 HCRYPTKEY* phKey
+	 );
+
+     using fn_CryptSetKeyParam = BOOL WINAPI(
+		 HCRYPTKEY  hKey,
+		 DWORD      dwParam,
+		 const BYTE* pbData,
+		 DWORD      dwFlags
+	 );
+
+     using fn_CryptEncrypt = BOOL WINAPI(
+		 HCRYPTKEY  hKey,
+		 HCRYPTHASH hHash,
+		 BOOL       Final,
+		 DWORD      dwFlags,
+		 BYTE* pbData,
+		 DWORD* pdwDataLen,
+		 DWORD      dwBufLen
+	 );
+
+     using fn_CryptDecrypt = BOOL WINAPI(
+		 HCRYPTKEY  hKey,
+		 HCRYPTHASH hHash,
+		 BOOL       Final,
+		 DWORD      dwFlags,
+		 BYTE* pbData,
+		 DWORD* pdwDataLen
+	 );
+
+     using fn_CryptDestroyKey = BOOL WINAPI(
+		 HCRYPTKEY hKey
+	 );
+
+     using fn_CryptReleaseContext = BOOL WINAPI(
+		 HCRYPTPROV hProv,
+		 DWORD      dwFlags
+	 );
+
+    using fn_RtlGetCompressionWorkSpaceSize = NTSTATUS WINAPI(
+		USHORT CompressionFormatAndEngine,
+		PULONG CompressBufferWorkSpaceSize,
+		PULONG CompressFragmentWorkSpaceSize
     );
+
+    using fn_RtlCompressBuffer = NTSTATUS WINAPI(
+		USHORT CompressionFormatAndEngine,
+		PUCHAR UncompressedBuffer,
+		ULONG  UncompressedBufferSize,
+		PUCHAR CompressedBuffer,
+		ULONG  CompressedBufferSize,
+		ULONG  UncompressedChunkSize,
+		PULONG FinalCompressedSize,
+		PVOID  WorkSpace
+    );
+
+    using fn_RtlDecompressBuffer = NTSTATUS WINAPI(
+		USHORT CompressionFormat,
+		PUCHAR UncompressedBuffer,
+		ULONG  UncompressedBufferSize,
+		PUCHAR CompressedBuffer,
+		ULONG  CompressedBufferSize,
+		PULONG FinalUncompressedSize
+    );
+
+	using fn_RtlDecompressBufferEx = NTSTATUS WINAPI(
+		USHORT CompressionFormat,
+		PUCHAR UncompressedBuffer,
+		ULONG  UncompressedBufferSize,
+		PUCHAR CompressedBuffer,
+		ULONG  CompressedBufferSize,
+		PULONG FinalUncompressedSize,
+		PVOID  WorkSpace
+	);
+
+	using fn_CreateDecompressor = BOOL WINAPI(
+		DWORD                         Algorithm,
+		PCOMPRESS_ALLOCATION_ROUTINES AllocationRoutines,
+		PDECOMPRESSOR_HANDLE          DecompressorHandle
+	);
+
+	using fn_Decompress = BOOL WINAPI(
+		DECOMPRESSOR_HANDLE DecompressorHandle,
+		LPCVOID             CompressedData,
+		SIZE_T              CompressedDataSize,
+		PVOID               UncompressedBuffer,
+		SIZE_T              UncompressedBufferSize,
+		PSIZE_T             UncompressedDataSize
+	);
+
+	using fn_CloseDecompressor = BOOL WINAPI(
+		DECOMPRESSOR_HANDLE DecompressorHandle
+	);
 }
-
-typedef LRESULT(CALLBACK *SUBCLASSPROC)(
-    HWND      hWnd,
-    UINT      uMsg,
-    WPARAM    wParam,
-    LPARAM    lParam,
-    UINT_PTR  uIdSubclass,
-    DWORD_PTR dwRefData
-);
-
-typedef struct _SUBCLASS_CALL {
-    SUBCLASSPROC pfnSubclass;    // subclass procedure
-    WPARAM       uIdSubclass;    // unique subclass identifier
-    DWORD_PTR    dwRefData;      // optional ref data
-} SUBCLASS_CALL, PSUBCLASS_CALL;
-
-typedef struct _SUBCLASS_FRAME {
-    UINT                    uCallIndex;   // index of next callback to call
-    UINT                    uDeepestCall; // deepest uCallIndex on stack
-    struct _SUBCLASS_FRAME  *pFramePrev;  // previous subclass frame pointer
-    struct _SUBCLASS_HEADER *pHeader;     // header associated with this frame
-} SUBCLASS_FRAME, PSUBCLASS_FRAME;
-
-typedef struct _SUBCLASS_HEADER {
-    UINT           uRefs;        // subclass count
-    UINT           uAlloc;       // allocated subclass call nodes
-    UINT           uCleanup;     // index of call node to clean up
-    DWORD          dwThreadId;   // thread id of window we are hooking
-    SUBCLASS_FRAME *pFrameCur;   // current subclass frame pointer
-    SUBCLASS_CALL  CallArray[1]; // base of packed call node array
-} SUBCLASS_HEADER, *PSUBCLASS_HEADER;

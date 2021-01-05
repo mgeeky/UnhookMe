@@ -5,12 +5,6 @@
 #include "usings.h"
 #include "resolver.h"
 
-#ifdef _MSC_VER
-    // Microsoft Visual Studio Compiler
-#    pragma warning(disable:4996)
-#    pragma warning(disable:4309)
-#endif
-
 
 #define        SET_ERROR            this->SetError( GetLastError() )
 #define        RETURN_ERROR2(x)     {this->_SetError( x, __LINE__, __FUNCTION__ ); return FALSE;}
@@ -21,6 +15,69 @@
                                     ; return FALSE; }
 #define        CHECK_MALLOC( ptr)   if( ptr == nullptr){ SetError( ERROR_HEAP_CORRUPTED); return FALSE;}
 
+
+PE::~PE()
+{
+    close();
+}
+
+void PE::close()
+{
+	if (_bAutoMapOfFile && _bIsFileMapped)
+	{
+		if (lpMapOfFile != nullptr)
+		{
+			// DO NOT change below UnmapViewOfFile to RESOLVE(...) one as it introduces infinite recursion!
+			UnmapViewOfFile(lpMapOfFile);
+			_bIsFileMapped = false;
+		}
+
+		if (_hMapOfFile != (HANDLE)INVALID_HANDLE_VALUE && _hMapOfFile != nullptr)
+		{
+			CloseHandle(_hMapOfFile);
+			_hMapOfFile = INVALID_HANDLE_VALUE;
+			_bAutoMapOfFile = false;
+		}
+	}
+
+	if (this->bMemoryAnalysis && this->lpMapOfFile != nullptr)
+	{
+		VirtualFree(this->lpMapOfFile, sizeOfFile + 1, MEM_DECOMMIT | MEM_FREE | MEM_RELEASE);
+	}
+
+	if (hFileHandle != INVALID_HANDLE_VALUE && hFileHandle != nullptr)
+	{
+		CloseHandle(hFileHandle);
+	}
+
+	hFileHandle = INVALID_HANDLE_VALUE;
+	if (this->bIsValidPE)
+	{
+		if (lpDOSStub != nullptr) free(lpDOSStub);
+	}
+
+    _initVars();
+}
+
+DWORD PE::GetIB32() const
+{ 
+    if (this->bPreferBaseAddressThanImageBase)
+    {
+        return static_cast<DWORD>(reinterpret_cast<std::uintptr_t>(this->lpMapOfFile));
+    }
+
+    return imgNtHdrs32.OptionalHeader.ImageBase; 
+}
+
+ULONGLONG PE::GetIB64() const
+{ 
+	if (this->bPreferBaseAddressThanImageBase)
+	{
+		return (ULONGLONG)this->lpMapOfFile;
+	}
+
+    return imgNtHdrs64.OptionalHeader.ImageBase; 
+}
 
 ///////////////////////////////////////////////////////////////////////////////////////
 // Loads and analyses image/dump/memory .
@@ -71,7 +128,7 @@ bool PE::LoadFile()
         RETURN_ERROR2(ERROR_INVALID_MAGIC)
     }
 
-        // Retrieving DOS STUB
+    // Retrieving DOS STUB
     DWORD dwActualPos;
     if (this->bMemoryAnalysis == false)
         dwActualPos = SetFilePointer(hFileHandle, 0, nullptr, FILE_CURRENT);
@@ -256,7 +313,6 @@ bool PE::LoadFile()
 
 bool PE::_OpenFile()
 {
-    RESOLVE_NO_UNHOOK(kernel32, CreateFileA);
     if (this->bMemoryAnalysis)
     {
         if (this->_selfProcessAnalysis)
@@ -264,6 +320,7 @@ bool PE::_OpenFile()
             hFileHandle = GetCurrentProcess();
             return true;
         }
+
         return (hFileHandle != (HANDLE)-1 && hFileHandle != (HANDLE)0);
     }
 
@@ -271,6 +328,7 @@ bool PE::_OpenFile()
         return TRUE;
 
     /* Open the file */
+    RESOLVE_NO_UNHOOK(kernel32, CreateFileA);
     if (this->bReadOnly)
     {
         hFileHandle = _CreateFileA(szFileName.c_str(), GENERIC_READ,
@@ -839,25 +897,41 @@ bool PE::ParseEAT(DWORD dwAddressOfEAT)
         aNamesRVA = reinterpret_cast<DWORD*>(reinterpret_cast<intptr_t>(lpBuffer) + this->RVA2RAW(imgExportDirectory.AddressOfNames));
     }
 
+    WORD byOrdinal = 0;
+
     // Iterating all exported functions from this module
     for (f = 0; unsigned(f) < imgExportDirectory.NumberOfFunctions; f++)
     {
         ZeroMemory((void*)&expFunc, sizeof(expFunc));
 
-        wOrdinal = aOrdinals[f] + static_cast<WORD>(imgExportDirectory.Base);
-        expFunc.wOrdinal = wOrdinal;
-        expFunc.uExportIndex = wOrdinal - imgExportDirectory.Base;
+        expFunc.bIsOrdinal = false;
+        expFunc.dwOrdinal = 0;
+        expFunc.uExportIndex = f;
 
-        size_t eatIndex = wOrdinal - imgExportDirectory.Base;
+        if (static_cast<DWORD>(f) >= imgExportDirectory.NumberOfNames)
+        {
+            expFunc.bIsOrdinal = true;
+            expFunc.wOrdinal = byOrdinal + static_cast<WORD>(imgExportDirectory.Base);
+            byOrdinal++;
+        }
+        else
+        {
+            expFunc.wOrdinal = aOrdinals[f] + static_cast<WORD>(imgExportDirectory.Base);
+        }
+
+        wOrdinal = expFunc.wOrdinal;
+        size_t eatIndex = static_cast<DWORD>(wOrdinal) - imgExportDirectory.Base;
 
         if (this->bMemoryAnalysis)
         {
-            dwNameRAW = (aNamesRVA[f]) + reinterpret_cast<intptr_t>(lpBuffer);
+            if (!expFunc.bIsOrdinal)
+                dwNameRAW = (aNamesRVA[f]) + reinterpret_cast<intptr_t>(lpBuffer);
             expFunc.dwPtrValue = (aAddresses[eatIndex]) + _moduleStartPos;
         }
         else
         {
-            dwNameRAW = this->RVA2RAW(aNamesRVA[f]) + reinterpret_cast<intptr_t>(lpBuffer);
+            if (!expFunc.bIsOrdinal)
+                dwNameRAW = this->RVA2RAW(aNamesRVA[f]) + reinterpret_cast<intptr_t>(lpBuffer);
             expFunc.dwPtrValue = this->RVA2RAW(aAddresses[eatIndex]) + reinterpret_cast<intptr_t>(lpBuffer);
         }
 
@@ -867,12 +941,17 @@ bool PE::ParseEAT(DWORD dwAddressOfEAT)
         if ((dwNameRAW - offset) > this->sizeOfFile)
             break;
 
-        // Parsing name of an export thunk
-        if (_HexChar(*((char*)dwNameRAW)) == '.')
+        if (expFunc.bIsOrdinal)
+        {
+        }
+        else if (_HexChar(*((char*)dwNameRAW)) == '.') // Parsing name of an export thunk
         {
             expFunc.bIsOrdinal = true;
         }
-        else strncpy(expFunc.szFunction, (const char*)(dwNameRAW), sizeof(expFunc.szFunction) - 1);
+        else
+        {
+            strncpy(expFunc.szFunction, (const char*)(dwNameRAW), sizeof(expFunc.szFunction) - 1);
+        }
 
         if (expFunc.dwPtrValueRVA > (codeSection->s.VirtualAddress + codeSection->s.SizeOfRawData))
         {
@@ -1204,7 +1283,7 @@ bool PE::ApplyAllRelocs(ULONGLONG newImageBase)
             auto ptr = &this->lpMapOfFile[mapOffset];
 
             DWORD oldProtection;
-            if (!changeProtection(ptr, 8, PAGE_READWRITE, &oldProtection))
+            if (!changeProtection(ptr, 8, PAGE_EXECUTE_READWRITE, &oldProtection))
             {
                 continue;
             }
@@ -1748,7 +1827,7 @@ bool PE::ReadBytes(LPVOID lpBuffer, size_t dwSize, size_t dwOffset, AccessMethod
     }
 
     bool bRes;
-    if (this->bMemoryAnalysis && this->bIsValidPE)
+    if (this->bMemoryAnalysis /*&& this->bIsValidPE */)
     {
         auto addr = reinterpret_cast<intptr_t>(lpMapOfFile) + _dwCurrentOffset;
         auto addr2 = _moduleStartPos + _dwCurrentOffset;
@@ -1756,7 +1835,7 @@ bool PE::ReadBytes(LPVOID lpBuffer, size_t dwSize, size_t dwOffset, AccessMethod
         RESOLVE_NO_UNHOOK(kernel32, ReadProcessMemory);
         if (method == Arbitrary)
         {
-            changeProtection(reinterpret_cast<LPVOID>(_dwCurrentOffset), dwSize, PAGE_READWRITE, &dwOldProtect);
+            changeProtection(reinterpret_cast<LPVOID>(_dwCurrentOffset), dwSize, PAGE_EXECUTE_READWRITE, &dwOldProtect);
 
             if (this->_selfProcessAnalysis)
             {
@@ -1786,7 +1865,7 @@ bool PE::ReadBytes(LPVOID lpBuffer, size_t dwSize, size_t dwOffset, AccessMethod
         }
         else if (addr2 < static_cast<ULONGLONG>(_moduleStartPos) || addr2 > static_cast<ULONGLONG>(_moduleStartPos + sizeOfFile))
         {
-            changeProtection(reinterpret_cast<LPVOID>(addr2), dwSize, PAGE_READWRITE, &dwOldProtect);
+            changeProtection(reinterpret_cast<LPVOID>(addr2), dwSize, PAGE_EXECUTE_READWRITE, &dwOldProtect);
             
             if (this->_selfProcessAnalysis)
             {
@@ -1852,6 +1931,7 @@ bool PE::ReadBytes(LPVOID lpBuffer, size_t dwSize, size_t dwOffset, AccessMethod
     if (this->bIsValidPE)
         _dwCurrentOffset += dwSize;
 
+    SetLastError(0);
     return TRUE;
 }
 
@@ -1935,7 +2015,7 @@ bool PE::WriteBytes(LPVOID lpBuffer, size_t dwSize, size_t dwOffset, AccessMetho
         RESOLVE_NO_UNHOOK(kernel32, WriteProcessMemory);
         if (method == Arbitrary)
         {
-            changeProtection(reinterpret_cast<LPVOID>(_dwCurrentOffset), dwSize, PAGE_READWRITE, &dwOldProtect);
+            changeProtection(reinterpret_cast<LPVOID>(_dwCurrentOffset), dwSize, PAGE_EXECUTE_READWRITE, &dwOldProtect);
             auto err = GetLastError();
 
             if (this->_selfProcessAnalysis)
@@ -1967,7 +2047,7 @@ bool PE::WriteBytes(LPVOID lpBuffer, size_t dwSize, size_t dwOffset, AccessMetho
         }
         else if (addr2 > static_cast<ULONGLONG>(_moduleStartPos) || addr2 < static_cast<ULONGLONG>(_moduleStartPos + sizeOfFile))
         {
-            changeProtection(reinterpret_cast<LPVOID>(addr2), dwSize, PAGE_READWRITE, &dwOldProtect);
+            changeProtection(reinterpret_cast<LPVOID>(addr2), dwSize, PAGE_EXECUTE_READWRITE, &dwOldProtect);
 
             if (this->_selfProcessAnalysis)
             {
@@ -2096,6 +2176,126 @@ inline char PE::_HexChar(int c)
     else return '.';
 }
 
+
+bool PE::AnalyseMemory(DWORD dwPID, LPBYTE dwAddress, size_t dwSize, bool readOnly, bool isMapped)
+{
+	this->bUseRVAInsteadOfRAW = this->bIsValidPE =
+		this->_bIsFileMapped = this->bMemoryAnalysis = true;
+	this->lpMapOfFile = dwAddress;
+    this->sizeOfFile = dwSize;
+    this->bPreferBaseAddressThanImageBase = !isMapped;
+	this->_bAutoMapOfFile = false;
+	this->bReadOnly = readOnly;
+
+	DWORD flags = PROCESS_VM_READ | PROCESS_QUERY_INFORMATION;
+
+	if (!readOnly) flags |= PROCESS_VM_WRITE | PROCESS_VM_OPERATION;
+
+	if (dwPID == 0 || dwPID == GetCurrentProcessId())
+	{
+		this->hFileHandle = GetCurrentProcess();
+		this->_selfProcessAnalysis = true;
+		this->dwPID = GetCurrentProcessId();
+	}
+	else
+	{
+		RESOLVE_NO_UNHOOK(kernel32, OpenProcess);
+		this->hFileHandle = _OpenProcess(flags, FALSE, dwPID);
+	}
+
+	auto err = ::GetLastError();
+	if (this->hFileHandle == nullptr)
+	{
+		RETURN_ERROR
+	}
+
+    if (dwSize == 0)
+    {
+        RESOLVE_NO_UNHOOK(kernel32, VirtualQueryEx);
+
+		MEMORY_BASIC_INFORMATION mbi = { 0 };
+		if (!_VirtualQueryEx(this->hFileHandle, dwAddress, &mbi, sizeof(mbi)))
+		{
+			RETURN_ERROR
+		}
+
+        dwSize = mbi.RegionSize;
+        uint8_t buf[1024] = { 0 };
+        DWORD dwOldProtect, dwRead; 
+        bool success = false;
+
+		changeProtection(reinterpret_cast<LPVOID>(dwAddress), _countof(buf), PAGE_EXECUTE_READWRITE, &dwOldProtect);
+
+		if (this->_selfProcessAnalysis)
+		{
+			memcpy(buf, reinterpret_cast<LPCVOID>(dwAddress), _countof(buf));
+            success = true;
+		}
+		else
+		{
+            SIZE_T sizeRead = 0;
+            RESOLVE_NO_UNHOOK(kernel32, ReadProcessMemory);
+
+			bool bRes = _ReadProcessMemory(this->hFileHandle, reinterpret_cast<LPCVOID>(dwAddress),
+				buf, _countof(buf), reinterpret_cast<SIZE_T*>(&sizeRead));
+            success = bRes;
+		}
+
+		changeProtection(reinterpret_cast<LPVOID>(dwAddress), _countof(buf), dwOldProtect, &dwRead);
+
+        if (success)
+        {
+			auto imgDos = reinterpret_cast<PIMAGE_DOS_HEADER>(buf);
+			auto imgFileHdr = reinterpret_cast<PIMAGE_FILE_HEADER>(&buf[imgDos->e_lfanew + 4]);
+			if ((imgFileHdr->Machine & IMAGE_FILE_MACHINE_AMD64) == 0)
+			{
+				auto ntHdrs = reinterpret_cast<PIMAGE_NT_HEADERS32>(&buf[imgDos->e_lfanew]);
+				this->sizeOfFile = dwSize = ntHdrs->OptionalHeader.SizeOfImage;
+			}
+			else
+			{
+				auto ntHdrs = reinterpret_cast<PIMAGE_NT_HEADERS64>(&buf[imgDos->e_lfanew]);
+				this->sizeOfFile = dwSize = max(this->sizeOfFile, ntHdrs->OptionalHeader.SizeOfImage);
+			}
+        }
+    }
+
+	this->bIsValidPE = true;
+
+	if (!this->_selfProcessAnalysis)
+	{
+		SetLastError(0);
+		this->lpMapOfFile = reinterpret_cast<LPBYTE>(VirtualAlloc(nullptr, this->sizeOfFile + 1, 
+            MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE));
+		if (this->lpMapOfFile == nullptr)
+		{
+			RETURN_ERROR
+		}
+
+		_moduleStartPos = reinterpret_cast<intptr_t>(dwAddress);
+
+		if (!ReadEntireModuleSafely(this->lpMapOfFile, sizeOfFile, _moduleStartPos))
+		{
+			RETURN_ERROR2(ERROR_READ_LESS_THAN_SHOULD)
+		}
+	}
+	else
+	{
+		this->lpMapOfFile = dwAddress;
+		_moduleStartPos = reinterpret_cast<size_t>(dwAddress);
+	}
+
+    _dwCurrentOffset = 0;
+	char fileName[MAX_PATH] = { 0 };
+	strncpy_s(fileName, MAX_PATH, szFileName.c_str(), MAX_PATH);
+	GetModuleFileNameA(GetModuleHandle(nullptr), fileName, sizeof szFileName);
+
+    SetLastError(0);
+    _dwLastError = 0;
+
+	return PE::LoadFile();
+}
+
 ///////////////////////////////////////////////////////////////////////////////////////
 // Launches process module analysis by specifying desired module HMODULE handle
 
@@ -2183,7 +2383,8 @@ bool PE::AnalyseProcessModule(DWORD dwPID, HMODULE hModule, bool readOnly)
             this->bIsValidPE = true;
 
             SetLastError(0);
-            this->lpMapOfFile = reinterpret_cast<LPBYTE>(VirtualAlloc(nullptr, me32.modBaseSize + 1, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE));
+            this->lpMapOfFile = reinterpret_cast<LPBYTE>(VirtualAlloc(
+                nullptr, me32.modBaseSize + 1, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE));
             if (this->lpMapOfFile == nullptr)
             {
                 RETURN_ERROR
@@ -2504,8 +2705,9 @@ bool PE::ReadEntireModuleSafely(LPVOID lpBuffer, size_t dwSize, size_t dwOffset)
 
         if (!ReadBytes(buf, toRead, reinterpret_cast<size_t>(address), Arbitrary))
         {
-            free(buf);
-            return false;
+            //free(buf);
+            //return false;
+            memset(buf, 0, toRead);
         }
 
         //memcpy(&reinterpret_cast<BYTE*>(lpBuffer)[reinterpret_cast<intptr_t>(mbi.BaseAddress)], buf, toRead);

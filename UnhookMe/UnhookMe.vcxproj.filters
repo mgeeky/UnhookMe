@@ -35,5 +35,8 @@
     <ClInclude Include="usings.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="hexdump.hpp">
+      <Filter>Header Files</Filter>
+    </ClInclude>
   </ItemGroup>
 </Project>
