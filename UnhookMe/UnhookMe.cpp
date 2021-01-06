@@ -48,8 +48,10 @@ int main()
 	unsigned char* ptr = reinterpret_cast<unsigned char*>(MessageBoxW);    
 
     std::wcout << L"1. Starting UnhookMe" << std::endl;
-    if(!displayImportedFunction(ptr)) return 1;
-    std::wcout << L"\t- Function's stub bytes:" << std::endl << getHexdump(ptr, 16) << std::endl;
+
+    displayImportedFunction(ptr);
+
+    std::wcout << std::endl << L"Function's stub bytes:" << std::endl << getHexdump(ptr, 16) << std::endl;
     std::wcout << L"3. 1st MessageBox - not inspected (the one that may be monitored by EDRs/AVs)." << std::endl;
 
     MessageBoxW(0, L"This message box is subject for dynamic inspection.", L"First - Not inspected", 0);
@@ -97,8 +99,16 @@ int main()
     unsigned char* ptr2 = reinterpret_cast<unsigned char*>(_MessageBoxW.getAddress());
     
     std::wcout << std::endl << L"8. 3rd MessageBox - the one that is unpatched, unhooked, invisible to user-mode API monitoring" << std::endl;
-    std::wcout << L"9. Resolved MessageBoxW address: 0x" << std::hex << ptr2 << L", restored stub:" << std::endl 
-        << getHexdump(ptr, 16) << std::endl;
+    std::wcout << L"9. Restored MessageBoxW stub bytes:" << std::endl << getHexdump(ptr, 16) << std::endl;
+
+    if (ptr != ptr2)
+    {
+        std::wcout << L"10. MessageBoxW address: Hooked (0x" << std::hex << ptr << L"), Unhooked: (0x" << std::hex << ptr2 << L")" << std::endl;
+    }
+    else
+    {
+        std::wcout << L"10. MessageBoxW address: (0x" << std::hex << ptr << L") - was never really hooked, only trampolined." << std::endl;
+    }
 
     _MessageBoxW(0, L"Look Ma! I'm unhooked!", L"Third - Unhooked", 0);
 
@@ -112,22 +122,22 @@ int main()
 bool displayImportedFunction(const unsigned char* ptr)
 {
 	PE pe;
-    if (!pe.AnalyseProcess(0, true))
+    if (!pe.AnalyseProcess(0, true) || pe.GetError() != 0)
     {
-        std::wcout << L"[!] Could not analyse own process memory. Error: " << pe.GetErrorString() << std::endl;
+        std::wcout << L"[!] Could not analyse own process memory. Error: " << pe.GetErrorString() << std::endl;;
         return false;
     }
 
+    size_t num = 0;
 	auto msgbox = std::find_if(pe.vImports.begin(), pe.vImports.end(), [&](const IMPORTED_FUNCTION& imp) {
 		return !strcmp(imp.szFunction, "MessageBoxW");
 		});
 
     if (msgbox == pe.vImports.end()) {
-        std::wcout << L"[!] Could not find imported MessageBoxW thunk! Maybe UnhookMe.exe was packed with UPX?" << std::endl;
+        std::wcout << L"[!] Could not find imported MessageBoxW thunk! Imports: " << pe.vImports.size() << std::endl;
         return false;
     }
 
-	std::wcout << L"\t- Address of MessageBoxW: 0x" << std::hex << ptr << std::endl;
 	std::wcout << L"\t- Imported function hint: 0x" << std::dec << msgbox->dwHint << std::endl;
 	std::wcout << L"\t- Imported function address: 0x" << std::hex << msgbox->dwPtrValueVA << std::endl;
     std::wcout << L"\t- Imported function RVA: 0x" << std::hex << msgbox->dwPtrValueRVA << std::endl;

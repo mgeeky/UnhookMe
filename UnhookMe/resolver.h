@@ -345,7 +345,6 @@ namespace UnhookingImportResolver
             }
 
             this->hModule = globalResolverCache.getModule(dllName);
-
             try
             {
                 const char* ptr = reinterpret_cast<const char*>(this->hModule);
@@ -370,17 +369,17 @@ namespace UnhookingImportResolver
                 static auto _VirtualQuery = reinterpret_cast<fn_VirtualQuery*>(::GetProcAddress(
                     GetModuleHandleW(L"kernel32.dll"), 
                     OBFI_ASCII("VirtualQuery")
-                ));
+));
 
-                MEMORY_BASIC_INFORMATION mbi = { 0 };
+MEMORY_BASIC_INFORMATION mbi = { 0 };
 
-                if (_VirtualQuery != NULL && _VirtualQuery(this->hModule, &mbi, sizeof(mbi)) != sizeof(mbi)
-                    || mbi.State == MEM_FREE || mbi.RegionSize < 0x1000
-                    || (mbi.Type != MEM_IMAGE && mbi.Type != MEM_MAPPED))
-                {
-                    // If not, invalidate the cache entry and reload it.
-                    this->hModule = nullptr;
-                }
+if (_VirtualQuery != NULL && _VirtualQuery(this->hModule, &mbi, sizeof(mbi)) != sizeof(mbi)
+    || mbi.State == MEM_FREE || mbi.RegionSize < 0x1000
+    || (mbi.Type != MEM_IMAGE && mbi.Type != MEM_MAPPED))
+{
+    // If not, invalidate the cache entry and reload it.
+    this->hModule = nullptr;
+}
             }
 
             if (!this->hModule)
@@ -410,14 +409,14 @@ namespace UnhookingImportResolver
                 die();
             }
 
-            FARPROC func;
+            FARPROC func, funcOriginal = ::GetProcAddress(this->hModule, funcName.c_str());;
             if (unhook)
             {
                 func = manualExportLookup();
             }
             else
             {
-                func = ::GetProcAddress(this->hModule, funcName.c_str());
+                func = funcOriginal;
             }
 
             if (!func) {
@@ -429,18 +428,17 @@ namespace UnhookingImportResolver
                 //      RESOLVE(kernel32, MessageBoxA);     // kernel32 doesn't export MessageBoxA, there should be user32 instead.
                 //
 
-
                 output(verbose, OBF(L"\t[-] Resolver(unhook="), unhook, OBF(L"): WARNING. Could not resolve symbol "), str_to_wstr(dllName), OBF(L"!"), str_to_wstr(funcName));
                 output(verbose, OBF(L"\t    I should die here, but will fall back to GetProcAddress and carry on instead."));
 
                 //die();
 
-                func = ::GetProcAddress(this->hModule, funcName.c_str());
+                func = funcOriginal;
                 if (!func)
                 {
-
+#ifdef _DEBUG
                     output(verbose, OBF(L"\t[-] GetProcAddress too was not able to resolve that symbol! Christ that serious, going in full - last try."));
-
+#endif
                     auto mod = GetModuleHandleA(dllName.c_str());
                     if (!mod)
                     {
@@ -457,10 +455,12 @@ namespace UnhookingImportResolver
                         output(verbose, OBF(L"\t[!] GetProcAddress too was not able to resolve that symbol! That's more than FATAL. Sorry :("));
                         die();
                     }
+#ifdef _DEBUG
                     else
                     {
                         output(verbose, OBF(L"\t[?] Something is not alright with Resolver. Last chance approach (classic LoadLibrary+GetProcAddress) retrieved API's address."));
                     }
+#endif
                 }
 
                 unhook = false;
@@ -468,26 +468,30 @@ namespace UnhookingImportResolver
 
             if (unhook)
             {
-                if (!unhookImport(func))
+                if (func != funcOriginal)
+                {
+					output(verbose, OBF(L"[#] Found IAT hijacking on symbol: "), str_to_wstr(funcName),
+						OBF(L" (orig: 0x"), std::hex, func, OBF(L" -> hook: 0x"), std::hex, funcOriginal, OBF(L")"));
+
+                    unhookImport(funcOriginal);
+                }
+
+                if(!unhookImport(func))
                 {
                     output(verbose, OBF(L"\t[!] Resolver(unhook="), unhook, OBF(L"): FATAL. Could not unhook symbol "), str_to_wstr(dllName), OBF(L"!"), str_to_wstr(funcName));
                     output(verbose, OBF(L"\t    I should die here, but will pretend nothing happen and carry on instead."));
-
                     //die();
                 }
             }
 
             if (wasItHooked != nullptr && *wasItHooked)
             {
-
                 output(true, OBF(L"[#] Resolver: WARNING. Symbol "), str_to_wstr(dllName), OBF(L"!"), str_to_wstr(funcName), OBF(L" was hooked."));
-
             }
 
             globalResolverCache.setCachedFunction(dllName, funcName, func);
 
             output(verbose, OBF(L"\t[~] Resolved symbol "), str_to_wstr(dllNameShort), OBF(L"!"), str_to_wstr(funcName));
-
 
             resolvedFuncAddress = func;
         }
@@ -558,7 +562,6 @@ namespace UnhookingImportResolver
 
                 output(verbose, OBF(L"\t[.] Following forward chain of symbol: "), str_to_wstr(fwd));
 
-
                 std::string moduleFwd(split(std::string(exportEntry->szForwarder), std::string(".")).front());
                 moduleFwd += OBFI_ASCII(".dll");
 
@@ -572,7 +575,6 @@ namespace UnhookingImportResolver
 
                 if (importDesc == peModule.vImportDescriptors.end())
                 {
-
                     output(verbose, OBF(L"[-] Could not find forwarded module's descriptor: "), str_to_wstr(fwd));
 
                     return nullptr;
@@ -588,7 +590,6 @@ namespace UnhookingImportResolver
 
                 if (fwdImport == peModule.vImports.end())
                 {
-
                     output(verbose, OBF(L"[-] Could not find forwarded module's import entry: "), str_to_wstr(fwd));
 
                     return nullptr;
@@ -621,7 +622,6 @@ namespace UnhookingImportResolver
                         this->hModule = _hModule;
                         unhook = false;
 
-
                         output(verbose, OBF(L"\t[.] Tried to locate symbol "), 
                             str_to_wstr(this->funcName), OBF(L" in kernelbase.dll but that didn't really pan out."),
                             OBF(L"\n\t\tCAUTION: Returning its GetProcAddress result."));
@@ -633,7 +633,6 @@ namespace UnhookingImportResolver
                 }
                 else
                 {
-
                     output(verbose, OBF(L"\t[.] Loading and parsing forwarded module: "), str_to_wstr(moduleFwd));
 
                     auto _dllNameShort = this->dllNameShort;
@@ -665,6 +664,7 @@ namespace UnhookingImportResolver
             }
 
 #ifdef _DEBUG
+            /*
             FARPROC trueAddr = ::GetProcAddress(this->hModule, funcName.c_str());
 
             if (resolved != reinterpret_cast<uintptr_t>(trueAddr))
@@ -679,6 +679,7 @@ namespace UnhookingImportResolver
                 output(true, OBF(L"[dbg] Incorrect symbol resolution!"));
                 die();
             }
+            */
 #endif
             return reinterpret_cast<FARPROC>(resolved);
         }
@@ -708,12 +709,10 @@ namespace UnhookingImportResolver
                 }
             );
 
-            auto addr = static_cast<DWORD>((exportEntry->dwThunkRVA));
-
             if (exportEntry != peLibraryFile.vExports.end())
             {
                 DWORD funcAddr = 0;
-                if (!peLibraryFile.ReadBytes(&funcAddr, sizeof(DWORD), addr, PE::File_Begin))
+                if (!peLibraryFile.ReadBytes(&funcAddr, sizeof(DWORD), exportEntry->dwThunkRVA, PE::File_Begin))
                 {
                     return false;
                 }
@@ -763,10 +762,7 @@ namespace UnhookingImportResolver
                             OBF(L" (orig: 0x"), std::hex, origExportRVA, OBF(L" -> hook: 0x"), std::hex, currThunkRVA, OBF(L")"));
 
                         currProcess.HookIAT(funcName, restore);
-
-
                         output(verbose, OBF(L"\tAttempted to restore it."));
-
                     }
                 }
                 else
@@ -777,26 +773,26 @@ namespace UnhookingImportResolver
 
             // Step 2: Check for hijacked EAT entries.
             {
-                PE ntdllInMemory;
-                if (!ntdllInMemory.AnalyseProcessModule(0, hModule, false))
+                PE mappedLib;
+                if (!mappedLib.AnalyseProcessModule(0, hModule, false))
                 {
                     return false;
                 }
 
                 auto inMemoryExportEntry = std::find_if(
-                    ntdllInMemory.vExports.begin(),
-                    ntdllInMemory.vExports.end(),
+                    mappedLib.vExports.begin(),
+                    mappedLib.vExports.end(),
                     [&funcName](const EXPORTED_FUNCTION& f) {
                         return (!strcmp(f.szFunction, funcName.c_str()));
                     }
                 );
 
-                auto addr = static_cast<DWORD>(ntdllInMemory.RVA2RAW(inMemoryExportEntry->dwThunkRVA));
-
-                if (inMemoryExportEntry != ntdllInMemory.vExports.end())
+                auto addr = static_cast<DWORD>(mappedLib.RVA2RAW(inMemoryExportEntry->dwThunkRVA));
+                if (inMemoryExportEntry != mappedLib.vExports.end() )
                 {
-                    const DWORD origExportRVA = inMemoryExportEntry->dwPtrValueRVA;
-                    const DWORD currThunkRVA = static_cast<DWORD>(reinterpret_cast<uintptr_t>(funcAddress) - reinterpret_cast<uintptr_t>(hModule));
+                    const DWORD origExportRVA = exportEntry->dwPtrValueRVA;
+                    //const DWORD currThunkRVA = static_cast<DWORD>(reinterpret_cast<uintptr_t>(funcAddress) - reinterpret_cast<uintptr_t>(hModule));
+                    const DWORD currThunkRVA = inMemoryExportEntry->dwPtrValueRVA;
 
                     if (origExportRVA != currThunkRVA && !inMemoryExportEntry->bIsForwarded)
                     {
@@ -805,15 +801,14 @@ namespace UnhookingImportResolver
                             *wasItHooked = true;
                         }
 
-                        // IAT hijacked
+                        // EAT hijacked
                         const DWORD restore = origExportRVA;
                         output(verbose, OBF(L"[#] Found EAT hijacking on symbol: "), str_to_wstr(funcName), OBF(L" (orig: 0x"),
                             std::hex, origExportRVA, OBF(L" -> hook: 0x"), std::hex, currThunkRVA, OBF(L")"));
 
-                        ntdllInMemory.HookEAT(funcName, restore);
+                        mappedLib.HookEAT(funcName, restore);
 
                         output(verbose, OBF(L"\tAttempted to restore it."));
-
                     }
                 }
                 else
@@ -833,7 +828,8 @@ namespace UnhookingImportResolver
                 DWORD old, old2;
                 if (VirtualProtect(funcAddress, Max_Bytes_Of_Function_To_Check, PAGE_EXECUTE_READWRITE, &old))
                 {
-                    if (peLibraryFile.ApplyRelocsInBuffer(reinterpret_cast<ULONGLONG>(hModule), addr, inFileImportStub, Max_Bytes_Of_Function_To_Check))
+                    if (peLibraryFile.ApplyRelocsInBuffer(reinterpret_cast<ULONGLONG>(hModule), 
+                        exportEntry->dwThunkRVA, inFileImportStub, Max_Bytes_Of_Function_To_Check))
                     {
                         for (size_t u = 0; u < Max_Bytes_Of_Function_To_Check; u++)
                         {
