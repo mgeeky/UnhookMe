@@ -7,6 +7,8 @@ The solution I'm proposing here is to switch from using linker-resolved WinAPI i
 
 ### Showcase
 
+![Unhookme showcase animation](https://raw.githubusercontent.com/mgeeky/UnhookMe/master/apimonitor.gif)
+
 Here's how `UnhookMe` example works:
 
 1. It presents us with the first `MessageBoxW` that is not subject for hooking
