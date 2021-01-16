@@ -144,4 +144,4 @@ Among the problems such dynamically-unhooking resolver faced are the issues with
 
 ### Author
 
-Mariusz Banach / mgeeky (@mariuszbit)
+Mariusz B. / mgeeky (@mariuszbit)
