@@ -13,8 +13,8 @@ namespace UnhookingImportResolver
 	//   globalLogFilePath          - where to redirect output log lines. If empty, pick stdout.
 	//
 
-	bool globalQuietOption = false;
-	bool globalVerboseOption = true;
+	bool globalQuietOption = true;
+	bool globalVerboseOption = false;
 	bool globalAntiSplicingOption = true;
 
 	wchar_t globalLogFilePath[MAX_PATH] = L"";
