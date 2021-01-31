@@ -125,6 +125,12 @@ struct __IMAGE_IMPORT_DESCRIPTOR
     std::vector< IMPORTED_FUNCTION> vImports;
 };
 
+struct __IMAGE_EXPORT_DIRECTORY
+{
+	IMAGE_EXPORT_DIRECTORY    d;
+	char szName[128];
+};
+
 struct __IMAGE_SECTION_HEADER
 {
     IMAGE_SECTION_HEADER s;
@@ -187,7 +193,7 @@ public:
     IMAGE_NT_HEADERS32                  imgNtHdrs32;
     IMAGE_NT_HEADERS64                  imgNtHdrs64;
 
-    IMAGE_EXPORT_DIRECTORY              imgExportDirectory;        // If this module provides
+    __IMAGE_EXPORT_DIRECTORY            imgExportDirectory;        // If this module provides
                                                                    // EAT, then this structure
                                                                    // will be filled correspondly
 
