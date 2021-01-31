@@ -33,8 +33,7 @@ void PE::close()
     {
         if (lpMapOfFile != nullptr)
         {
-            RESOLVE_NO_UNHOOK(kernel32, UnmapViewOfFile);
-            _UnmapViewOfFile(lpMapOfFile);
+            UnmapViewOfFile(lpMapOfFile);
             _bIsFileMapped = false;
 
             if (this->lpMapOfFile != nullptr)
@@ -236,6 +235,7 @@ bool PE::LoadFile()
         strncpy_s(d.szSectionName, szSectionName, PE_MAX_SECTION_NAME_LEN - 1);
 
         vSections.push_back(d);
+        auto sectSize = GetSafeSectionSize(d);
 
         if (bMemoryAnalysis)
         {
@@ -243,11 +243,11 @@ bool PE::LoadFile()
 
             if (this->bIs86)
             {
-                alignedSize = size_t((d.s.SizeOfRawData + imgNtHdrs32.OptionalHeader.SectionAlignment - 1) / imgNtHdrs32.OptionalHeader.SectionAlignment) * imgNtHdrs32.OptionalHeader.SectionAlignment;
+                alignedSize = size_t((sectSize + imgNtHdrs32.OptionalHeader.SectionAlignment - 1) / imgNtHdrs32.OptionalHeader.SectionAlignment) * imgNtHdrs32.OptionalHeader.SectionAlignment;
             }
             else
             {
-                alignedSize = size_t((d.s.SizeOfRawData + imgNtHdrs64.OptionalHeader.SectionAlignment - 1) / imgNtHdrs64.OptionalHeader.SectionAlignment) * imgNtHdrs64.OptionalHeader.SectionAlignment;
+                alignedSize = size_t((sectSize + imgNtHdrs64.OptionalHeader.SectionAlignment - 1) / imgNtHdrs64.OptionalHeader.SectionAlignment) * imgNtHdrs64.OptionalHeader.SectionAlignment;
             }
 
             if ((d.s.VirtualAddress + alignedSize) > endOfPEData)
@@ -257,9 +257,9 @@ bool PE::LoadFile()
         }
         else
         {
-            if (((size_t)d.s.PointerToRawData + (size_t)d.s.SizeOfRawData) > endOfPEData)
+            if (((size_t)d.s.PointerToRawData + (size_t)sectSize) > endOfPEData)
             {
-                endOfPEData = (size_t)d.s.PointerToRawData + (size_t)d.s.SizeOfRawData;
+                endOfPEData = (size_t)d.s.PointerToRawData + (size_t)sectSize;
             }
         }
     }
@@ -576,17 +576,19 @@ DWORD PE::RAW2RVA(size_t dwRAW) const
 
     auto sections = (this->bIs86) ? imgNtHdrs32.FileHeader.NumberOfSections : imgNtHdrs64.FileHeader.NumberOfSections;
 
-    while (i < sections)
-    {
-        if (vSections[i].s.PointerToRawData <= dwRAW &&
-            ((size_t)vSections[i].s.PointerToRawData
-                + (size_t)vSections[i].s.SizeOfRawData) > dwRAW)
-        {
-            dwRVA = dwRAW + vSections[i].s.VirtualAddress
-                - vSections[i].s.PointerToRawData;
-        }
-        i++;
-    }
+	while (i < sections)
+	{
+		auto sectSize = GetSafeSectionSize(vSections[i]);
+
+		if (vSections[i].s.PointerToRawData <= dwRAW &&
+			((size_t)vSections[i].s.PointerToRawData
+				+ (size_t)sectSize) > dwRAW)
+		{
+			dwRVA = dwRAW + vSections[i].s.VirtualAddress
+				- vSections[i].s.PointerToRawData;
+		}
+		i++;
+	}
     return static_cast<DWORD>(dwRVA);
 }
 
@@ -595,6 +597,7 @@ DWORD PE::RAW2RVA(size_t dwRAW) const
 // Function parses Import Address Table.
 // Additional argument dwAddressOfIAT could be used as a different base of the IAT (useful when
 // on start program hasn't got a valid IAT in DataDirectory[1] ).
+
 
 bool PE::ParseIAT(DWORD dwAddressOfIAT)
 {
@@ -686,7 +689,7 @@ bool PE::ParseIAT(DWORD dwAddressOfIAT)
         for (size_t u = 0; u < vSections.size(); u++)
         {
             auto ptr = vSections[u].s;
-            if (pIddIAT->VirtualAddress > ptr.VirtualAddress && pIddIAT->VirtualAddress < (ptr.VirtualAddress + ptr.SizeOfRawData)) {
+			if (pIddIAT->VirtualAddress > ptr.VirtualAddress && pIddIAT->VirtualAddress < (ptr.VirtualAddress + GetSafeSectionSize(vSections[u]))) {
                 dwSizeOfIAT = pIddIAT->Size;
                 break;
             }
@@ -856,7 +859,7 @@ bool PE::ParseIAT(DWORD dwAddressOfIAT)
                 if (iidTmp->OriginalFirstThunk == 0) itdTmp32 = &itdTmp232;
                 if (itdTmp32->u1.Function == 0 && itdTmp32->u1.Ordinal == 0) break;
 
-                bool importByOrdinal = (itdTmp64->u1.Function & IMAGE_ORDINAL_FLAG) != 0;
+                bool importByOrdinal = (itdTmp32->u1.Function & IMAGE_ORDINAL_FLAG32) != 0;
 
                 if (!fixNeeded)
                 {
@@ -882,14 +885,14 @@ bool PE::ParseIAT(DWORD dwAddressOfIAT)
                 // Rewriting (but firstly getting) address of procedure
                 if (importByOrdinal)
                 {
-                    impFunc.wOrdinal = IMAGE_ORDINAL32(itdTmp32->u1.Ordinal);
+                    impFunc.wOrdinal = IMAGE_ORDINAL64(itdTmp32->u1.Ordinal);
                     impFunc.dwPtrValueVA = impFunc.dwPtrValueRVA = 0;
                     memset(impFunc.szFunction, 0, sizeof(impFunc.szFunction) - 1);
                 }
                 else
                 {
                     // Image Import By Name struct
-                    iibnTmp = (IMAGE_IMPORT_BY_NAME*)(reinterpret_cast<intptr_t>(lpBuffer) + RVA2RAW(itdTmp32->u1.Function));
+                    iibnTmp = (IMAGE_IMPORT_BY_NAME*)(reinterpret_cast<intptr_t>(lpBuffer) + RVA2RAW(static_cast<size_t>(itdTmp32->u1.Function)));
 
                     if (iibnTmp->Name == 0 && !importByOrdinal)
                     {
@@ -909,7 +912,7 @@ bool PE::ParseIAT(DWORD dwAddressOfIAT)
 
                     impFunc.wOrdinal = 0;
                     impFunc.dwPtrValueRVA = itdTmp32->u1.Function;
-                    impFunc.dwPtrValueVA = RVA2VA32(itdTmp64->u1.Function);
+                    impFunc.dwPtrValueVA = RVA2VA64(itdTmp32->u1.Function);
 
                     strncpy_s(impFunc.szFunction, (const char*)iibnTmp->Name, sizeof(impFunc.szFunction) - 1);
                     for (size_t i = 0; i < sizeof(impFunc.szFunction); i++)
@@ -1024,6 +1027,7 @@ bool PE::ParseIAT(DWORD dwAddressOfIAT)
 
 
 
+
 ///////////////////////////////////////////////////////////////////////////////////////
 // This function list all EAT (Export Address Table) entries.
 // Additional argument dwAddressOfEAT could be used as a different base of the EAT (useful when
@@ -1077,11 +1081,10 @@ bool PE::ParseEAT(DWORD dwAddressOfEAT)
         if (pIddEAT->VirtualAddress == 0)
             RETURN_ERROR2(ERROR_EAT_UNACCESSIBLE);
 
-        if (pIddEAT->VirtualAddress > this->sizeOfFile
-            || pIddEAT->Size > this->sizeOfFile
-            || this->RVA2RAW(pIddEAT->VirtualAddress) > this->sizeOfFile
-            || this->RVA2RAW((size_t)pIddEAT->VirtualAddress + (size_t)pIddEAT->Size) > this->sizeOfFile)
-            RETURN_ERROR2(ERROR_EAT_CORRUPTED);
+		if ((!verifyAddressBounds(pIddEAT->VirtualAddress) || !verifyAddressBounds((size_t)pIddEAT->VirtualAddress + (size_t)pIddEAT->Size)))
+		{
+			RETURN_ERROR2(ERROR_EAT_CORRUPTED);
+		}
     }
     else
         dwAddr = dwAddressOfEAT;
@@ -1195,7 +1198,7 @@ bool PE::ParseEAT(DWORD dwAddressOfEAT)
             strncpy_s(expFunc.szFunction, (const char*)(dwNameRAW), sizeof(expFunc.szFunction) - 1);
         }
 
-        if (expFunc.dwPtrValueRVA > (codeSection->s.VirtualAddress + codeSection->s.SizeOfRawData))
+		if (expFunc.dwPtrValueRVA > (codeSection->s.VirtualAddress + GetSafeSectionSize(*codeSection)))
         {
             // forwarder
             expFunc.bIsForwarded = true;
@@ -1218,6 +1221,30 @@ bool PE::ParseEAT(DWORD dwAddressOfEAT)
 
     this->hasExports = true;
     return TRUE;
+}
+
+DWORD PE::GetSafeSectionSize(const __IMAGE_SECTION_HEADER& sect) const
+{
+	DWORD size = 0;
+
+	if (sect.s.SizeOfRawData > 0)
+	{
+		size = sect.s.SizeOfRawData;
+		if (size > sizeOfFile) size = sizeOfFile;
+	}
+	else
+	{
+		for (const auto& nextSect : vSections)
+		{
+			if (nextSect.s.PointerToRawData > sect.s.PointerToRawData)
+			{
+				size = nextSect.s.PointerToRawData - sect.s.PointerToRawData;
+				break;
+			}
+		}
+	}
+
+	return size;
 }
 
 bool PE::ParseRelocs()
@@ -1277,7 +1304,7 @@ bool PE::ParseRelocs()
         for (size_t u = 0; u < vSections.size(); u++)
         {
             auto ptr = vSections[u].s;
-            if (pIddRelocs->VirtualAddress >= ptr.VirtualAddress && pIddRelocs->VirtualAddress < (ptr.VirtualAddress + ptr.SizeOfRawData)) {
+			if (pIddRelocs->VirtualAddress >= ptr.VirtualAddress && pIddRelocs->VirtualAddress < (ptr.VirtualAddress + GetSafeSectionSize(vSections[u]))) {
                 sizeOfRelocsFromSectionTable = pIddRelocs->Size;
                 break;
             }
@@ -1438,7 +1465,7 @@ bool PE::ParseResources()
         for (size_t u = 0; u < vSections.size(); u++)
         {
             auto ptr = vSections[u].s;
-            if (pIddResources->VirtualAddress >= ptr.VirtualAddress && pIddResources->VirtualAddress < (ptr.VirtualAddress + ptr.SizeOfRawData)) {
+			if (pIddResources->VirtualAddress >= ptr.VirtualAddress && pIddResources->VirtualAddress < (ptr.VirtualAddress + GetSafeSectionSize(vSections[u]))) {
                 sizeOfResourcesFromSectionTable = pIddResources->Size;
                 break;
             }
@@ -1756,28 +1783,28 @@ PE::CreateSection(DWORD dwSizeOfSection, DWORD dwDesiredAccess, const std::strin
     dwFileAlignment = (this->bIs86) ? imgNtHdrs32.OptionalHeader.FileAlignment : imgNtHdrs64.OptionalHeader.FileAlignment;
     dwSectionAlignment = (this->bIs86) ? imgNtHdrs32.OptionalHeader.SectionAlignment : imgNtHdrs64.OptionalHeader.SectionAlignment;
 
-    //dwNewVirtualAddress     =   (GetLastSection()->SizeOfRawData / dwSectionAlignment)
-    //                            * dwSectionAlignment + GetLastSection()->VirtualAddress;
+	//dwNewVirtualAddress     =   (GetSafeSectionSize(GetLastSection()) / dwSectionAlignment)
+	//                            * dwSectionAlignment + GetLastSection()->VirtualAddress;
 
-    dwNewVirtualAddress = GetLastSection().s.SizeOfRawData + GetLastSection().s.VirtualAddress;
+	dwNewVirtualAddress = GetSafeSectionSize(GetLastSection()) + GetLastSection().s.VirtualAddress;
 
-    // section name
-    if (szNameOfSection.size() < IMAGE_SIZEOF_SHORT_NAME)
-        strcpy_s(reinterpret_cast<char*>(ish.s.Name), sizeof(ish.s.Name), szNameOfSection.c_str());
-    else
-        memcpy((char*)ish.s.Name, szNameOfSection.c_str(), IMAGE_SIZEOF_SHORT_NAME);
+	// section name
+	if (szNameOfSection.size() < IMAGE_SIZEOF_SHORT_NAME)
+		strcpy_s(reinterpret_cast<char*>(ish.s.Name), sizeof(ish.s.Name), szNameOfSection.c_str());
+	else
+		memcpy((char*)ish.s.Name, szNameOfSection.c_str(), IMAGE_SIZEOF_SHORT_NAME);
 
-    ish.s.SizeOfRawData = dwSizeOfSection;
-    ish.s.VirtualAddress = dwNewVirtualAddress;
-    ish.s.Misc.VirtualSize = (dwSizeOfSection / dwFileAlignment + 1) * dwFileAlignment;
-    ish.s.Characteristics = dwDesiredAccess;
+	ish.s.SizeOfRawData = dwSizeOfSection;
+	ish.s.VirtualAddress = dwNewVirtualAddress;
+	ish.s.Misc.VirtualSize = (dwSizeOfSection / dwFileAlignment + 1) * dwFileAlignment;
+	ish.s.Characteristics = dwDesiredAccess;
 
-    //ish.PointerToRawData    =    GetLastSection()->PointerToRawData + GetLastSection()->SizeOfRawData;
-    ish.s.PointerToRawData = static_cast<DWORD>(this->sizeOfFile);
+	//ish.PointerToRawData    =    GetLastSection()->PointerToRawData + GetSafeSectionSize(GetLastSection());
+	ish.s.PointerToRawData = static_cast<DWORD>(this->sizeOfFile);
 
-    this->numOfNewSections++;
-    DWORD sectionSizeRounded = (dwSizeOfSection / dwSectionAlignment + 1) * dwSectionAlignment;
-    DWORD numOfSections;
+	this->numOfNewSections++;
+	DWORD sectionSizeRounded = (dwSizeOfSection / dwSectionAlignment + 1) * dwSectionAlignment;
+	DWORD numOfSections;
 
     if (this->bIs86)
     {
@@ -3115,7 +3142,7 @@ DWORD PE::HookEAT(const std::string& szExportThunk, DWORD hookedRVA)
 
 std::vector<uint8_t> PE::ReadOverlay()
 {
-    const size_t pos = (size_t)GetLastSection().s.PointerToRawData + (size_t)GetLastSection().s.SizeOfRawData;
+	const size_t pos = (size_t)GetLastSection().s.PointerToRawData + (size_t)GetSafeSectionSize(GetLastSection());
 
     if (pos > sizeOfFile)
     {
@@ -3137,8 +3164,8 @@ std::vector<uint8_t> PE::ReadOverlay()
 
 std::vector<uint8_t> PE::ReadSection(const __IMAGE_SECTION_HEADER& section)
 {
-    const size_t num = section.s.SizeOfRawData;
-    const size_t pos = (bMemoryAnalysis) ? section.s.VirtualAddress : section.s.PointerToRawData;
+	const size_t num = GetSafeSectionSize(section);
+	const size_t pos = (bMemoryAnalysis) ? section.s.VirtualAddress : section.s.PointerToRawData;
 
     if (pos > sizeOfFile)
     {
@@ -3254,30 +3281,32 @@ std::vector<MEMORY_BASIC_INFORMATION> PE::collectProcessMemoryMap()
 
 void PE::adjustOptionalHeader()
 {
-    if (this->bIs86)
-    {
-        PIMAGE_OPTIONAL_HEADER32 phdr = &imgNtHdrs32.OptionalHeader;
-        phdr->SizeOfImage = this->vSections.back().s.VirtualAddress + this->vSections.back().s.Misc.VirtualSize;
-        phdr->SizeOfCode = phdr->SizeOfUninitializedData = phdr->SizeOfInitializedData = 0;
+	if (this->bIs86)
+	{
+		PIMAGE_OPTIONAL_HEADER32 phdr = &imgNtHdrs32.OptionalHeader;
+		phdr->SizeOfImage = this->vSections.back().s.VirtualAddress + this->vSections.back().s.Misc.VirtualSize;
+		phdr->SizeOfCode = phdr->SizeOfUninitializedData = phdr->SizeOfInitializedData = 0;
 
-        for (const auto& sect : this->vSections)
-        {
-            if (sect.s.Characteristics & IMAGE_SCN_CNT_CODE) phdr->SizeOfCode += sect.s.SizeOfRawData;
-            if (sect.s.Characteristics & IMAGE_SCN_CNT_INITIALIZED_DATA) phdr->SizeOfInitializedData += sect.s.SizeOfRawData;
-            if (sect.s.Characteristics & IMAGE_SCN_CNT_UNINITIALIZED_DATA) phdr->SizeOfUninitializedData += sect.s.SizeOfRawData;
-        }
-    }
-    else
-    {
-        PIMAGE_OPTIONAL_HEADER64 phdr = &imgNtHdrs64.OptionalHeader;
-        phdr->SizeOfImage = this->vSections.back().s.VirtualAddress + this->vSections.back().s.Misc.VirtualSize;
-        phdr->SizeOfCode = phdr->SizeOfUninitializedData = phdr->SizeOfInitializedData = 0;
+		for (const auto& sect : this->vSections)
+		{
+			auto sectSize = GetSafeSectionSize(sect);
+			if (sect.s.Characteristics & IMAGE_SCN_CNT_CODE) phdr->SizeOfCode += sectSize;
+			if (sect.s.Characteristics & IMAGE_SCN_CNT_INITIALIZED_DATA) phdr->SizeOfInitializedData += sectSize;
+			if (sect.s.Characteristics & IMAGE_SCN_CNT_UNINITIALIZED_DATA) phdr->SizeOfUninitializedData += sectSize;
+		}
+	}
+	else
+	{
+		PIMAGE_OPTIONAL_HEADER64 phdr = &imgNtHdrs64.OptionalHeader;
+		phdr->SizeOfImage = this->vSections.back().s.VirtualAddress + this->vSections.back().s.Misc.VirtualSize;
+		phdr->SizeOfCode = phdr->SizeOfUninitializedData = phdr->SizeOfInitializedData = 0;
 
-        for (const auto& sect : this->vSections)
-        {
-            if (sect.s.Characteristics & IMAGE_SCN_CNT_CODE) phdr->SizeOfCode += sect.s.SizeOfRawData;
-            if (sect.s.Characteristics & IMAGE_SCN_CNT_INITIALIZED_DATA) phdr->SizeOfInitializedData += sect.s.SizeOfRawData;
-            if (sect.s.Characteristics & IMAGE_SCN_CNT_UNINITIALIZED_DATA) phdr->SizeOfUninitializedData += sect.s.SizeOfRawData;
-        }
-    }
+		for (const auto& sect : this->vSections)
+		{
+			auto sectSize = GetSafeSectionSize(sect);
+			if (sect.s.Characteristics & IMAGE_SCN_CNT_CODE) phdr->SizeOfCode += sectSize;
+			if (sect.s.Characteristics & IMAGE_SCN_CNT_INITIALIZED_DATA) phdr->SizeOfInitializedData += sectSize;
+			if (sect.s.Characteristics & IMAGE_SCN_CNT_UNINITIALIZED_DATA) phdr->SizeOfUninitializedData += sectSize;
+		}
+	}
 }

@@ -459,6 +459,7 @@ private:
     bool AppendShellcode(BYTE* whereToReturn, uint8_t *shellcode, size_t sizeOfShellcode, __IMAGE_SECTION_HEADER *imgNewSection);
 
     bool ApplyAllRelocs(ULONGLONG newImageBase);
+	DWORD GetSafeSectionSize(const __IMAGE_SECTION_HEADER& sect) const;
 
     bool _OpenFile();
 
