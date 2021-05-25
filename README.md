@@ -8,6 +8,7 @@ The solution I'm proposing here is to switch from using linker-resolved WinAPI i
 ### Showcase
 
 ![Unhookme showcase animation](https://raw.githubusercontent.com/mgeeky/UnhookMe/master/apimonitor.gif)
+![showcase animation](https://raw.githubusercontent.com/mgeeky/UnhookMe/7e139616780869bf439b76f291d9d10d12e086f7/apimonitor.gif)
 
 Here's how `UnhookMe` example works:
 
@@ -43,7 +44,7 @@ There are in total 5 C++ source code/header files that your solution need to inc
 
 Your program will require only two headers being included:
 
-```
+```c++
 #include "usings.h"
 #include "resolver.h"
 ```
@@ -59,7 +60,7 @@ Resolver global options:
 - **`globalAntiSplicingOption`**   - unhook resolved functions if they're hooked.
 - **`globalLogFilePath`**          - where to redirect output log lines. If empty, pick stdout.
 
-```
+```c++
 bool globalQuietOption = false;
 bool globalVerboseOption = true;
 bool globalAntiSplicingOption = true;
@@ -71,7 +72,7 @@ wchar_t globalLogFilePath[MAX_PATH] = L"";
 
 In order to use Resolver a function pointer type must be first declared with `using` statement of strict form:
 
-```
+```c++
     using fn_FunctionName = ReturnType WINAPI (
         ParamType1 paramName1,
         ...,
@@ -88,7 +89,7 @@ The _FunctionName_ will correspond to the WinAPI that we want to have ImportReso
 
 Having function pointer type defined like specified above, we will be able to use it in the following manner:
 
-```
+```c++
     RESOLVE(libraryName, FunctionName);
     ReturnType output = _FunctionName(param1, ..., paramN);
 ```
@@ -97,7 +98,7 @@ The macro `RESOLVE` takes care of instantiating `ImportResolver` templated objec
 
 Resolver introduces several more Macrodefinitions offering easy to use in various circumstances constructor invocation:
 
-```
+```c++
 #define RESOLVE(mod, func)                    RESOLVE_PARAMETERIZED(mod, func, ::globalVerboseOption, ::globalAntiSplicingOption)
 #define RESOLVE_NO_UNHOOK(mod, func)          RESOLVE_PARAMETERIZED(mod, func, ::globalVerboseOption, false)
 
@@ -109,7 +110,7 @@ Resolver introduces several more Macrodefinitions offering easy to use in variou
 
 Resolver's constructor:
 
-```
+```c++
     template<typename Ret, typename ...Args>
     ImportResolver<Ret WINAPI(Args...)>(
             std::string dllName,
@@ -144,4 +145,4 @@ Among the problems such dynamically-unhooking resolver faced are the issues with
 
 ### Author
 
-Mariusz B. / mgeeky (@mariuszbit)
+Mariusz Banach / mgeeky (@mariuszbit)

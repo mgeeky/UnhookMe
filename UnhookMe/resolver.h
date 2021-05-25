@@ -356,39 +356,7 @@ namespace UnhookingImportResolver
                 globalResolverCache.invalidateModule(dllName);
             }
 
-            static const char *kernel = "kernel32.dll";
-            static const char *ntdll = "ntdll.dll";
-            
-            auto dllNamePtr = strrchr(dllName.c_str(), '\\');
-            if (dllNamePtr == nullptr) dllNamePtr = dllName.c_str();
-            else dllNamePtr++;
-
-            if (this->hModule != nullptr && (strcmp(dllNamePtr, kernel) != 0 && strcmp(dllNamePtr, ntdll) != 0))
-            {
-                // Check if library is still loaded (despite having it's cached ImageBase)
-                static auto _VirtualQuery = reinterpret_cast<fn_VirtualQuery*>(::GetProcAddress(
-                    GetModuleHandleW(L"kernel32.dll"), 
-                    OBFI_ASCII("VirtualQuery")
-));
-
-MEMORY_BASIC_INFORMATION mbi = { 0 };
-
-if (_VirtualQuery != NULL && _VirtualQuery(this->hModule, &mbi, sizeof(mbi)) != sizeof(mbi)
-    || mbi.State == MEM_FREE || mbi.RegionSize < 0x1000
-    || (mbi.Type != MEM_IMAGE && mbi.Type != MEM_MAPPED))
-{
-    // If not, invalidate the cache entry and reload it.
-    this->hModule = nullptr;
-}
-            }
-
-            if (!this->hModule)
-            {
-                output(verbose, OBF(L"[.] Loading library: "), str_to_wstr(dllName), OBF(L""));
-                this->hModule = ::LoadLibraryA(dllName.c_str());
-
-                globalResolverCache.setCachedModuleBase(dllName, this->hModule);
-            }
+            assertLibraryLoaded();
 
             //
             // GlobalAddAtomA despite being exported by Kernel32.dll requries user32.dll to be preloaded & initialized
@@ -413,6 +381,23 @@ if (_VirtualQuery != NULL && _VirtualQuery(this->hModule, &mbi, sizeof(mbi)) != 
             if (unhook)
             {
                 func = manualExportLookup();
+
+                //
+                // Assert module is still loaded. There were cases where for instance advapi32.dll got 
+                // unloaded after resolving ReadProcMemory/VirtualQueryEx/others, leading to a crash.
+                //
+                auto prevModule = this->hModule;
+                uintptr_t offset = reinterpret_cast<uintptr_t>(funcOriginal)
+                    - reinterpret_cast<uintptr_t>(this->hModule);
+
+                assertLibraryLoaded();
+
+                if (this->hModule != prevModule)
+                {
+                    auto a = (uintptr_t)(this->hModule);
+                    auto b = (uintptr_t)(offset);
+                    func = FARPROC(a + b);
+                }
             }
             else
             {
@@ -468,6 +453,12 @@ if (_VirtualQuery != NULL && _VirtualQuery(this->hModule, &mbi, sizeof(mbi)) != 
 
             if (unhook)
             {
+                if(!checkIsAddressAvailable((uintptr_t)func))
+                {
+                    func = funcOriginal;
+                    unhook = false;
+                }
+
                 if (func != funcOriginal)
                 {
 					output(verbose, OBF(L"[#] Found IAT hijacking on symbol: "), str_to_wstr(funcName),
@@ -494,6 +485,142 @@ if (_VirtualQuery != NULL && _VirtualQuery(this->hModule, &mbi, sizeof(mbi)) != 
             output(verbose, OBF(L"\t[~] Resolved symbol "), str_to_wstr(dllNameShort), OBF(L"!"), str_to_wstr(funcName));
 
             resolvedFuncAddress = func;
+        }
+
+        bool checkIsAddressAvailable(uintptr_t address)
+        {
+            static auto _VirtualQuery = reinterpret_cast<fn_VirtualQuery*>(nullptr);
+
+            if (!_VirtualQuery)
+            {
+                _VirtualQuery = reinterpret_cast<fn_VirtualQuery*>(::GetProcAddress(
+                    GetModuleHandleW(L"kernel32.dll"),
+                    OBFI_ASCII("VirtualQuery")
+                ));
+            }
+
+            MEMORY_BASIC_INFORMATION mbi = { 0 };
+
+            LPCVOID addr = (LPCVOID)address;
+
+            if (_VirtualQuery != NULL && _VirtualQuery(addr, &mbi, sizeof(mbi)) != sizeof(mbi)
+                || mbi.State == MEM_FREE || mbi.RegionSize < 0x1000
+                || (mbi.Type != MEM_IMAGE && mbi.Type != MEM_MAPPED))
+            {
+                return false;
+            }
+
+            return true;
+        }
+
+        void assertLibraryLoaded()
+        {
+            static const char* kernel = "kernel32.dll";
+            static const char* ntdll = "ntdll.dll";
+
+            auto dllNamePtr = strrchr(dllName.c_str(), '\\');
+            if (dllNamePtr == nullptr) dllNamePtr = dllName.c_str();
+            else dllNamePtr++;
+
+            if (this->hModule != nullptr && (strcmp(dllNamePtr, kernel) != 0 && strcmp(dllNamePtr, ntdll) != 0))
+            {
+                // Check if library is still loaded (despite having it's cached ImageBase)
+                if (!checkIsAddressAvailable((uintptr_t)this->hModule))
+                {
+                    // If not, invalidate the cache entry and reload it.
+                    this->hModule = nullptr;
+                }
+            }
+
+            if(!this->hModule)
+            {
+                bool loaded = false;
+
+                {
+                    static auto _CreateToolhelp32Snapshot = reinterpret_cast<fn_CreateToolhelp32Snapshot*>(nullptr);
+                    if (!_CreateToolhelp32Snapshot)
+                    {
+                        _CreateToolhelp32Snapshot = reinterpret_cast<fn_CreateToolhelp32Snapshot*>(::GetProcAddress(
+                            GetModuleHandleW(L"kernel32.dll"),
+                            OBFI_ASCII("CreateToolhelp32Snapshot")
+                        ));
+                    }
+
+                    static auto _Module32FirstW = reinterpret_cast<fn_Module32FirstW*>(nullptr);
+                    if (!_Module32FirstW)
+                    {
+                        _Module32FirstW = reinterpret_cast<fn_Module32FirstW*>(::GetProcAddress(
+                            GetModuleHandleW(L"kernel32.dll"),
+                            OBFI_ASCII("Module32FirstW")
+                        ));
+                    }
+
+                    static auto _Module32NextW = reinterpret_cast<fn_Module32NextW*>(nullptr);
+                    if (!_Module32NextW)
+                    {
+                        _Module32NextW = reinterpret_cast<fn_Module32NextW*>(::GetProcAddress(
+                            GetModuleHandleW(L"kernel32.dll"),
+                            OBFI_ASCII("Module32NextW")
+                        ));
+                    }
+
+                    HANDLE hSnap = _CreateToolhelp32Snapshot(TH32CS_SNAPMODULE, GetCurrentProcessId());
+                    if (hSnap == nullptr || hSnap == (HANDLE)INVALID_HANDLE_VALUE)
+                    {
+                        return;
+                    }
+
+                    MODULEENTRY32W me32 = { 0 };
+                    me32.dwSize = sizeof(MODULEENTRY32W);
+
+                    if (!_Module32FirstW(hSnap, &me32))
+                    {
+                        CloseHandle(hSnap);
+                        return;
+                    }
+
+                    std::wstring wdllName(dllName.begin(), dllName.end());
+
+                    do
+                    {
+                        auto modBase = reinterpret_cast<uintptr_t>(me32.modBaseAddr);
+                        auto hModulePtr = reinterpret_cast<uintptr_t>(hModule);
+
+                        if (stringicompare(std::wstring(me32.szExePath), wdllName))
+                        {
+                            loaded = true;
+                            size_t a = (size_t)me32.modBaseAddr;
+                            size_t b = (size_t)this->hModule;
+
+                            if (a != b)
+                            {
+                                this->hModule = (HINSTANCE)me32.modBaseAddr;
+                                break;
+                            }
+                        }
+
+                        if (!_Module32NextW(hSnap, &me32))
+                        {
+                            if (::GetLastError() != ERROR_NO_MORE_FILES)
+                            {
+                                return;
+                            }
+
+                            break;
+                        }
+                    } while (true);
+
+                    CloseHandle(hSnap);
+                }
+
+                if (!loaded)
+                {
+                    output(verbose, OBF(L"[.] Loading library: "), str_to_wstr(dllName), OBF(L""));
+                    this->hModule = ::LoadLibraryA(dllName.c_str());
+
+                    globalResolverCache.setCachedModuleBase(dllName, this->hModule);
+                }
+            }
         }
 
         auto call(Args... args)
@@ -535,7 +662,9 @@ if (_VirtualQuery != NULL && _VirtualQuery(this->hModule, &mbi, sizeof(mbi)) != 
         FARPROC manualExportLookup()
         {
             PE peModule;
-            if (!peModule.AnalyseProcessModule(0, hModule, true))
+            bool res = peModule.AnalyseProcessModule(0, hModule, true);
+
+            if(!res)
             {
                 output(verbose, OBF(L"[!] Resolver(unhook="), unhook, OBF(L"): FATAL. Could not parse module's PE headers: "), str_to_wstr(dllName));
                 return nullptr;
@@ -712,12 +841,12 @@ if (_VirtualQuery != NULL && _VirtualQuery(this->hModule, &mbi, sizeof(mbi)) != 
             if (exportEntry != peLibraryFile.vExports.end())
             {
                 DWORD funcAddr = 0;
-                if (!peLibraryFile.ReadBytes(&funcAddr, sizeof(DWORD), exportEntry->dwThunkRVA, PE::File_Begin))
+                if (!peLibraryFile.ReadBytes(&funcAddr, sizeof(DWORD), exportEntry->dwThunkRVA, PE::AccessMethod::File_Begin))
                 {
                     return false;
                 }
 
-                if (!peLibraryFile.ReadBytes(inFileImportStub, sizeof(inFileImportStub), peLibraryFile.RVA2RAW(funcAddr), PE::File_Begin))
+                if (!peLibraryFile.ReadBytes(inFileImportStub, sizeof(inFileImportStub), peLibraryFile.RVA2RAW(funcAddr), PE::AccessMethod::File_Begin))
                 {
                     return false;
                 }

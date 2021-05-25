@@ -33,35 +33,39 @@ void PE::close()
     {
         if (lpMapOfFile != nullptr)
         {
-            RESOLVE_NO_UNHOOK(kernel32, UnmapViewOfFile);
-            _UnmapViewOfFile(lpMapOfFile);
+            UnmapViewOfFile(lpMapOfFile);
             _bIsFileMapped = false;
+
+            if (this->lpMapOfFile != nullptr)
+            {
+                VirtualFree(this->lpMapOfFile, 0, MEM_FREE | MEM_RELEASE);
+            }
         }
 
         if (_hMapOfFile != (HANDLE)INVALID_HANDLE_VALUE && _hMapOfFile != nullptr)
         {
-
             CloseHandle(_hMapOfFile);
             _hMapOfFile = INVALID_HANDLE_VALUE;
             _bAutoMapOfFile = false;
         }
     }
-
-    if (this->bMemoryAnalysis && this->lpMapOfFile != nullptr)
+    else
     {
-        VirtualFree(this->lpMapOfFile, sizeOfFile + 1, MEM_DECOMMIT | MEM_FREE | MEM_RELEASE);
+        _bIsFileMapped = false;
+        _bAutoMapOfFile = false;
+        _hMapOfFile = INVALID_HANDLE_VALUE;
     }
 
-    if (hFileHandle != INVALID_HANDLE_VALUE && hFileHandle != nullptr)
+    if (!_selfProcessAnalysis)
     {
-        CloseHandle(hFileHandle);
+        if (hFileHandle != INVALID_HANDLE_VALUE && hFileHandle != nullptr)
+        {
+            CloseHandle(hFileHandle);
+        }
     }
 
     hFileHandle = INVALID_HANDLE_VALUE;
-    if (this->bIsValidPE)
-    {
-        if (!lpDOSStub.empty()) lpDOSStub.clear();
-    }
+    if (!lpDOSStub.empty()) lpDOSStub.clear();
 
     _initVars();
 }
@@ -165,7 +169,7 @@ bool PE::LoadFile()
     if (this->bIs86)
     {
         ptrSize = 4;
-        if (!ReadBytes(reinterpret_cast<LPVOID>(&imgNtHdrs32), sizeof(IMAGE_NT_HEADERS32), imgDosHdr.e_lfanew, File_Begin, true)) { READ_FAIL }
+        if (!ReadBytes(reinterpret_cast<LPVOID>(&imgNtHdrs32), sizeof(IMAGE_NT_HEADERS32), imgDosHdr.e_lfanew, AccessMethod::File_Begin, true)) { READ_FAIL }
 
         if (('EP' != imgNtHdrs32.Signature))
         {
@@ -182,7 +186,7 @@ bool PE::LoadFile()
     else
     {
         ptrSize = 8;
-        if (!ReadBytes(reinterpret_cast<LPVOID>(&imgNtHdrs64), sizeof(IMAGE_NT_HEADERS64), imgDosHdr.e_lfanew, File_Begin, true))
+        if (!ReadBytes(reinterpret_cast<LPVOID>(&imgNtHdrs64), sizeof(IMAGE_NT_HEADERS64), imgDosHdr.e_lfanew, AccessMethod::File_Begin, true))
         {
             READ_FAIL
         }
@@ -216,7 +220,7 @@ bool PE::LoadFile()
             READ_FAIL
         }
 
-        strncpy_s(szSectionName, (const char*)s.Name, strlen(szSectionName) - 1);
+        memcpy(szSectionName, (const char*)s.Name, sizeof(szSectionName) - 1);
         for (size_t i = 0; i < sizeof(szSectionName); i++)
         {
             if (szSectionName[i] < 0x20 || szSectionName[i] > 0x7f)
@@ -228,9 +232,10 @@ bool PE::LoadFile()
         __IMAGE_SECTION_HEADER d = { 0 };
 
         d.s = s;
-        memcpy(d.szSectionName, szSectionName, PE_MAX_SECTION_NAME_LEN);
+        strncpy_s(d.szSectionName, szSectionName, PE_MAX_SECTION_NAME_LEN - 1);
 
         vSections.push_back(d);
+        auto sectSize = GetSafeSectionSize(d);
 
         if (bMemoryAnalysis)
         {
@@ -238,11 +243,11 @@ bool PE::LoadFile()
 
             if (this->bIs86)
             {
-                alignedSize = ((d.s.SizeOfRawData + imgNtHdrs32.OptionalHeader.SectionAlignment - 1) / imgNtHdrs32.OptionalHeader.SectionAlignment) * imgNtHdrs32.OptionalHeader.SectionAlignment;
+                alignedSize = size_t((sectSize + imgNtHdrs32.OptionalHeader.SectionAlignment - 1) / imgNtHdrs32.OptionalHeader.SectionAlignment) * imgNtHdrs32.OptionalHeader.SectionAlignment;
             }
             else
             {
-                alignedSize = ((d.s.SizeOfRawData + imgNtHdrs64.OptionalHeader.SectionAlignment - 1) / imgNtHdrs64.OptionalHeader.SectionAlignment) * imgNtHdrs64.OptionalHeader.SectionAlignment;
+                alignedSize = size_t((sectSize + imgNtHdrs64.OptionalHeader.SectionAlignment - 1) / imgNtHdrs64.OptionalHeader.SectionAlignment) * imgNtHdrs64.OptionalHeader.SectionAlignment;
             }
 
             if ((d.s.VirtualAddress + alignedSize) > endOfPEData)
@@ -252,9 +257,9 @@ bool PE::LoadFile()
         }
         else
         {
-            if ((d.s.PointerToRawData + d.s.SizeOfRawData) > endOfPEData)
+            if (((size_t)d.s.PointerToRawData + (size_t)sectSize) > endOfPEData)
             {
-                endOfPEData = d.s.PointerToRawData + d.s.SizeOfRawData;
+                endOfPEData = (size_t)d.s.PointerToRawData + (size_t)sectSize;
             }
         }
     }
@@ -462,7 +467,7 @@ bool PE::UpdateHeaders()
 
     this->_dwCurrentOffset = 0;
 
-    if (!WriteBytes(reinterpret_cast<LPVOID>(&imgDosHdr), sizeof(IMAGE_DOS_HEADER), 0, File_Begin))
+    if (!WriteBytes(reinterpret_cast<LPVOID>(&imgDosHdr), sizeof(IMAGE_DOS_HEADER), 0, AccessMethod::File_Begin))
     {
         this->_dwCurrentOffset = 0;
         SetFilePointer(this->hFileHandle, 0, nullptr, FILE_BEGIN);
@@ -479,7 +484,7 @@ bool PE::UpdateHeaders()
     if (this->bIs86)
     {
         imgNtHdrs32.FileHeader.NumberOfSections = static_cast<WORD>(GetSectionsCount());
-        if (!WriteBytes(reinterpret_cast<LPVOID>(&imgNtHdrs32), sizeof(IMAGE_NT_HEADERS32), imgDosHdr.e_lfanew, File_Begin, true))
+        if (!WriteBytes(reinterpret_cast<LPVOID>(&imgNtHdrs32), sizeof(IMAGE_NT_HEADERS32), imgDosHdr.e_lfanew, AccessMethod::File_Begin, true))
         {
             WRITE_FAIL
         }
@@ -487,7 +492,7 @@ bool PE::UpdateHeaders()
     else
     {
         imgNtHdrs64.FileHeader.NumberOfSections = static_cast<WORD>(GetSectionsCount());
-        if (!WriteBytes(reinterpret_cast<LPVOID>(&imgNtHdrs64), sizeof(IMAGE_NT_HEADERS64), imgDosHdr.e_lfanew, File_Begin, true))
+        if (!WriteBytes(reinterpret_cast<LPVOID>(&imgNtHdrs64), sizeof(IMAGE_NT_HEADERS64), imgDosHdr.e_lfanew, AccessMethod::File_Begin, true))
         {
             WRITE_FAIL
         };
@@ -536,8 +541,8 @@ size_t PE::RVA2RAW(size_t dwRVA, bool bForce) const
     for (size_t i = 0; i < dwSections; i++)
     {
         if (dwRVA >= vSections[i].s.VirtualAddress &&
-            dwRVA < (vSections[i].s.VirtualAddress
-                + vSections[i].s.Misc.VirtualSize)) {
+            dwRVA <= ((size_t)vSections[i].s.VirtualAddress
+                + (size_t)vSections[i].s.Misc.VirtualSize)) {
             dwRAW = dwRVA - vSections[i].s.VirtualAddress
                 + vSections[i].s.PointerToRawData;
             break;
@@ -571,17 +576,19 @@ DWORD PE::RAW2RVA(size_t dwRAW) const
 
     auto sections = (this->bIs86) ? imgNtHdrs32.FileHeader.NumberOfSections : imgNtHdrs64.FileHeader.NumberOfSections;
 
-    while (i < sections)
-    {
-        if (vSections[i].s.PointerToRawData <= dwRAW &&
-            (vSections[i].s.PointerToRawData
-                + vSections[i].s.SizeOfRawData) > dwRAW)
-        {
-            dwRVA = dwRAW + vSections[i].s.VirtualAddress
-                - vSections[i].s.PointerToRawData;
-        }
-        i++;
-    }
+	while (i < sections)
+	{
+		auto sectSize = GetSafeSectionSize(vSections[i]);
+
+		if (vSections[i].s.PointerToRawData <= dwRAW &&
+			((size_t)vSections[i].s.PointerToRawData
+				+ (size_t)sectSize) > dwRAW)
+		{
+			dwRVA = dwRAW + vSections[i].s.VirtualAddress
+				- vSections[i].s.PointerToRawData;
+		}
+		i++;
+	}
     return static_cast<DWORD>(dwRVA);
 }
 
@@ -590,6 +597,7 @@ DWORD PE::RAW2RVA(size_t dwRAW) const
 // Function parses Import Address Table.
 // Additional argument dwAddressOfIAT could be used as a different base of the IAT (useful when
 // on start program hasn't got a valid IAT in DataDirectory[1] ).
+
 
 bool PE::ParseIAT(DWORD dwAddressOfIAT)
 {
@@ -646,9 +654,9 @@ bool PE::ParseIAT(DWORD dwAddressOfIAT)
             RETURN_ERROR2(ERROR_IAT_UNACCESSIBLE)
         }
 
-        if (posIAT > this->sizeOfFile || posIAT + pIddIAT->Size > this->sizeOfFile)
+        if (posIAT > this->sizeOfFile || (size_t)posIAT + (size_t)pIddIAT->Size > this->sizeOfFile)
         {
-            if (!this->bMemoryAnalysis || (!verifyAddressBounds(posIAT) || !verifyAddressBounds(posIAT + pIddIAT->Size)))
+            if (!this->bMemoryAnalysis || (!verifyAddressBounds(posIAT) || !verifyAddressBounds((size_t)posIAT + (size_t)pIddIAT->Size)))
             {
                 RETURN_ERROR2(ERROR_IAT_CORRUPTED)
             }
@@ -660,7 +668,7 @@ bool PE::ParseIAT(DWORD dwAddressOfIAT)
             }
 
             iatBuffer.resize(sizeOfIAT);
-            if (!ReadBytes(iatBuffer.data(), sizeOfIAT, (GetImageBase() + pIddIAT->VirtualAddress), Arbitrary))
+            if (!ReadBytes(iatBuffer.data(), sizeOfIAT, (GetImageBase() + pIddIAT->VirtualAddress), AccessMethod::Arbitrary))
             {
                 READ_FAIL;
             }
@@ -681,7 +689,7 @@ bool PE::ParseIAT(DWORD dwAddressOfIAT)
         for (size_t u = 0; u < vSections.size(); u++)
         {
             auto ptr = vSections[u].s;
-            if (pIddIAT->VirtualAddress > ptr.VirtualAddress && pIddIAT->VirtualAddress < (ptr.VirtualAddress + ptr.SizeOfRawData)) {
+			if (pIddIAT->VirtualAddress > ptr.VirtualAddress && pIddIAT->VirtualAddress < (ptr.VirtualAddress + GetSafeSectionSize(vSections[u]))) {
                 dwSizeOfIAT = pIddIAT->Size;
                 break;
             }
@@ -699,7 +707,7 @@ bool PE::ParseIAT(DWORD dwAddressOfIAT)
     if (!iatBuffer.empty())
     {
         lpBuffer = iatBuffer.data();
-        fix = posIAT;
+        fix = (DWORD)posIAT;
         posIAT = 0;
     }
 
@@ -719,7 +727,7 @@ bool PE::ParseIAT(DWORD dwAddressOfIAT)
             break;
 
         bool fixNeeded = false;
-        DWORD _posIAT = posIAT;
+        DWORD _posIAT = (DWORD)posIAT;
 
         if (fix != 0)
         {
@@ -818,7 +826,7 @@ bool PE::ParseIAT(DWORD dwAddressOfIAT)
                 if (this->bIs86)
                 {
                     if (!ReadBytes(reinterpret_cast<LPVOID>(&itdTmp232), sizeof(itdTmp232),
-                        (iidTmp->FirstThunk + b * sizeof(IMAGE_THUNK_DATA32)), File_Begin))
+                        (iidTmp->FirstThunk + b * sizeof(IMAGE_THUNK_DATA32)), AccessMethod::File_Begin))
                     {
                         READ_FAIL;
                     }
@@ -826,7 +834,7 @@ bool PE::ParseIAT(DWORD dwAddressOfIAT)
                 else
                 {
                     if (!ReadBytes(reinterpret_cast<LPVOID>(&itdTmp264), sizeof(itdTmp264),
-                        (iidTmp->FirstThunk + b * sizeof(IMAGE_THUNK_DATA64)), File_Begin))
+                        (iidTmp->FirstThunk + b * sizeof(IMAGE_THUNK_DATA64)), AccessMethod::File_Begin))
                     {
                         READ_FAIL;
                     }
@@ -851,7 +859,7 @@ bool PE::ParseIAT(DWORD dwAddressOfIAT)
                 if (iidTmp->OriginalFirstThunk == 0) itdTmp32 = &itdTmp232;
                 if (itdTmp32->u1.Function == 0 && itdTmp32->u1.Ordinal == 0) break;
 
-                bool importByOrdinal = (itdTmp64->u1.Function & IMAGE_ORDINAL_FLAG) != 0;
+                bool importByOrdinal = (itdTmp32->u1.Function & IMAGE_ORDINAL_FLAG32) != 0;
 
                 if (!fixNeeded)
                 {
@@ -865,7 +873,7 @@ bool PE::ParseIAT(DWORD dwAddressOfIAT)
                 }
                 else
                 {
-                    if (!importByOrdinal && (itdTmp32->u1.Function > iatBuffer.size() || itdTmp32->u1.Function & 0xfffff > 0xffff))
+                    if ((!importByOrdinal) && (itdTmp32->u1.Function > iatBuffer.size() || ((itdTmp32->u1.Function & 0xfffff) > 0xffff)))
                     {
                         // skip invalid thunk
                         b++;
@@ -877,14 +885,14 @@ bool PE::ParseIAT(DWORD dwAddressOfIAT)
                 // Rewriting (but firstly getting) address of procedure
                 if (importByOrdinal)
                 {
-                    impFunc.wOrdinal = IMAGE_ORDINAL32(itdTmp32->u1.Ordinal);
+                    impFunc.wOrdinal = IMAGE_ORDINAL64(itdTmp32->u1.Ordinal);
                     impFunc.dwPtrValueVA = impFunc.dwPtrValueRVA = 0;
                     memset(impFunc.szFunction, 0, sizeof(impFunc.szFunction) - 1);
                 }
                 else
                 {
                     // Image Import By Name struct
-                    iibnTmp = (IMAGE_IMPORT_BY_NAME*)(reinterpret_cast<intptr_t>(lpBuffer) + RVA2RAW(itdTmp32->u1.Function));
+                    iibnTmp = (IMAGE_IMPORT_BY_NAME*)(reinterpret_cast<intptr_t>(lpBuffer) + RVA2RAW(static_cast<size_t>(itdTmp32->u1.Function)));
 
                     if (iibnTmp->Name == 0 && !importByOrdinal)
                     {
@@ -904,7 +912,7 @@ bool PE::ParseIAT(DWORD dwAddressOfIAT)
 
                     impFunc.wOrdinal = 0;
                     impFunc.dwPtrValueRVA = itdTmp32->u1.Function;
-                    impFunc.dwPtrValueVA = RVA2VA32(itdTmp64->u1.Function);
+                    impFunc.dwPtrValueVA = RVA2VA64(itdTmp32->u1.Function);
 
                     strncpy_s(impFunc.szFunction, (const char*)iibnTmp->Name, sizeof(impFunc.szFunction) - 1);
                     for (size_t i = 0; i < sizeof(impFunc.szFunction); i++)
@@ -937,7 +945,7 @@ bool PE::ParseIAT(DWORD dwAddressOfIAT)
                 }
                 else
                 {
-                    if (!importByOrdinal && (itdTmp64->u1.Function > iatBuffer.size() || itdTmp64->u1.Function & 0xfffff > 0xffff))
+                    if ((!importByOrdinal) && (itdTmp64->u1.Function > iatBuffer.size() || ((itdTmp64->u1.Function & 0xfffff) > 0xffff)))
                     {
                         // skip invalid thunk
                         b++;
@@ -1019,6 +1027,7 @@ bool PE::ParseIAT(DWORD dwAddressOfIAT)
 
 
 
+
 ///////////////////////////////////////////////////////////////////////////////////////
 // This function list all EAT (Export Address Table) entries.
 // Additional argument dwAddressOfEAT could be used as a different base of the EAT (useful when
@@ -1026,193 +1035,230 @@ bool PE::ParseIAT(DWORD dwAddressOfIAT)
 
 bool PE::ParseEAT(DWORD dwAddressOfEAT)
 {
-    size_t offset = 0;
-    LPVOID lpBuffer = this->lpMapOfFile;
-    EXPORTED_FUNCTION expFunc;
-    DWORD dwAddr;
-    int f = 0;
-    WORD wOrdinal = 0;
-    ULONGLONG dwRVA = 0, dwNameRAW = 0;
-    WORD* aOrdinals;
-    DWORD* aAddresses, * aNamesRVA;
-    DWORD dwBufSize = 0;
+	size_t offset = 0;
+	LPVOID lpBuffer = this->lpMapOfFile;
+	EXPORTED_FUNCTION expFunc;
+	DWORD dwAddr;
+	int f = 0;
+	WORD wOrdinal = 0;
+	ULONGLONG dwRVA = 0, dwNameRAW = 0;
+	WORD* aOrdinals;
+	DWORD* aAddresses, * aNamesRVA;
+	DWORD dwBufSize = 0;
 
-    if (!this->bIsValidPE)
-    {
-        RETURN_ERROR2(ERROR_INVALID_PE)
-    }
+	if (!this->bIsValidPE)
+	{
+		RETURN_ERROR2(ERROR_INVALID_PE)
+	}
 
-    auto codeSection = std::find_if(
-        vSections.begin(), vSections.end(), [](const __IMAGE_SECTION_HEADER& ish) {
-            return (ish.s.Characteristics & IMAGE_SCN_MEM_EXECUTE) == IMAGE_SCN_MEM_EXECUTE;
-        }
-    );
+	auto codeSection = std::find_if(
+		vSections.begin(), vSections.end(), [](const __IMAGE_SECTION_HEADER& ish) {
+			return (ish.s.Characteristics & IMAGE_SCN_MEM_EXECUTE) == IMAGE_SCN_MEM_EXECUTE;
+		}
+	);
 
-    if (codeSection == vSections.end())
-    {
-        return false;
-    }
+	if (codeSection == vSections.end())
+	{
+		return false;
+	}
 
-    // Validating Export Address Table (directory)
-    if (dwAddressOfEAT == 0)
-    {
-        IMAGE_DATA_DIRECTORY* pIddEAT;
+	// Validating Export Address Table (directory)
+	if (dwAddressOfEAT == 0)
+	{
+		IMAGE_DATA_DIRECTORY* pIddEAT;
 
-        if (this->bIs86)
-        {
-            pIddEAT = (IMAGE_DATA_DIRECTORY*)&imgNtHdrs32.OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXPORT];
-            dwAddr = imgNtHdrs32.OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXPORT].VirtualAddress;
-        }
-        else
-        {
-            pIddEAT = (IMAGE_DATA_DIRECTORY*)&imgNtHdrs64.OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXPORT];
-            dwAddr = imgNtHdrs64.OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXPORT].VirtualAddress;
-        }
+		if (this->bIs86)
+		{
+			pIddEAT = (IMAGE_DATA_DIRECTORY*)&imgNtHdrs32.OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXPORT];
+			dwAddr = imgNtHdrs32.OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXPORT].VirtualAddress;
+		}
+		else
+		{
+			pIddEAT = (IMAGE_DATA_DIRECTORY*)&imgNtHdrs64.OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXPORT];
+			dwAddr = imgNtHdrs64.OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXPORT].VirtualAddress;
+		}
 
-        if (pIddEAT->VirtualAddress == 0)
-            RETURN_ERROR2(ERROR_EAT_UNACCESSIBLE);
+		if (pIddEAT->VirtualAddress == 0)
+			RETURN_ERROR2(ERROR_EAT_UNACCESSIBLE);
 
-        if (pIddEAT->VirtualAddress > this->sizeOfFile
-            || pIddEAT->Size > this->sizeOfFile
-            || this->RVA2RAW(pIddEAT->VirtualAddress) > this->sizeOfFile
-            || this->RVA2RAW(pIddEAT->VirtualAddress + pIddEAT->Size) > this->sizeOfFile)
-            RETURN_ERROR2(ERROR_EAT_CORRUPTED);
-    }
-    else
-        dwAddr = dwAddressOfEAT;
+		if ((!verifyAddressBounds(pIddEAT->VirtualAddress) || !verifyAddressBounds((size_t)pIddEAT->VirtualAddress + (size_t)pIddEAT->Size)))
+		{
+			RETURN_ERROR2(ERROR_EAT_CORRUPTED);
+		}
+	}
+	else
+	{
+		dwAddr = dwAddressOfEAT;
+	}
 
-    if (this->_bIsFileMapped == false)
-        MapFile();
+	if (this->_bIsFileMapped == false)
+		MapFile();
 
-    ZeroMemory((void*)&expFunc, sizeof(expFunc));
+	ZeroMemory((void*)&expFunc, sizeof(expFunc));
 
-    const DWORD dwSizeOfEAT = (this->bIs86) ? imgNtHdrs32.OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXPORT].Size :
-        imgNtHdrs64.OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXPORT].Size;
+	const DWORD dwSizeOfEAT = (this->bIs86) ? imgNtHdrs32.OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXPORT].Size :
+		imgNtHdrs64.OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXPORT].Size;
 
-    // Now we taking access to IMAGE_EXPORT_DIRECTORY
-    offset = reinterpret_cast<intptr_t>(lpBuffer) + this->RVA2RAW(dwAddr);
-    this->imgExportDirectory = *reinterpret_cast<PIMAGE_EXPORT_DIRECTORY>(offset);
+	offset = reinterpret_cast<intptr_t>(lpBuffer) + this->RVA2RAW(dwAddr);
+	this->imgExportDirectory.d = *reinterpret_cast<PIMAGE_EXPORT_DIRECTORY>(offset);
 
-    // Validating image_export_directory
-    if (imgExportDirectory.AddressOfFunctions == 0 &&
-        imgExportDirectory.AddressOfNameOrdinals == 0 &&
-        imgExportDirectory.AddressOfNames == 0 &&
-        imgExportDirectory.Name == 0)
-    {
-        RETURN_ERROR2(ERROR_EAT_UNACCESSIBLE);
-    }
+	// Validating image_export_directory
+	if (imgExportDirectory.d.AddressOfFunctions == 0 &&
+		imgExportDirectory.d.AddressOfNameOrdinals == 0 &&
+		imgExportDirectory.d.AddressOfNames == 0 &&
+		imgExportDirectory.d.Name == 0)
+	{
+		RETURN_ERROR2(ERROR_EAT_UNACCESSIBLE);
+	}
 
-    if (imgExportDirectory.NumberOfFunctions > PE_MAX_EXPORTS_NUMBER)
-    {
-        RETURN_ERROR2(ERROR_TOO_MANY_EXPORTS);
-    }
+	if (imgExportDirectory.d.NumberOfFunctions > PE_MAX_EXPORTS_NUMBER)
+	{
+		RETURN_ERROR2(ERROR_TOO_MANY_EXPORTS);
+	}
 
-    // Computing offset of a module name
-    offset = this->RVA2RAW(imgExportDirectory.Name);
-    offset += reinterpret_cast<intptr_t>(lpBuffer);
+	// Computing offset of a module name
+	offset = this->RVA2RAW(imgExportDirectory.d.Name);
+	offset += reinterpret_cast<intptr_t>(lpBuffer);
 
-    // Preparing name of exported module.
-    if (this->RVA2RAW(dwAddr) > this->sizeOfFile)
-    {
-        RETURN_ERROR2(ERROR_EAT_CORRUPTED);
-    }
+	memset(this->imgExportDirectory.szName, 0, sizeof(this->imgExportDirectory.szName));
 
-    size_t addressOfFunctions;
-    if (this->bMemoryAnalysis)
-    {
-        aOrdinals = (WORD*)(reinterpret_cast<intptr_t>(lpBuffer) + (imgExportDirectory.AddressOfNameOrdinals));
-        addressOfFunctions = (imgExportDirectory.AddressOfFunctions);
-        aAddresses = reinterpret_cast<DWORD*>(reinterpret_cast<intptr_t>(lpBuffer) + addressOfFunctions);
-        aNamesRVA = reinterpret_cast<DWORD*>(reinterpret_cast<intptr_t>(lpBuffer) + (imgExportDirectory.AddressOfNames));
-    }
-    else
-    {
-        aOrdinals = (WORD*)(reinterpret_cast<intptr_t>(lpBuffer) +
-            this->RVA2RAW(imgExportDirectory.AddressOfNameOrdinals));
-        addressOfFunctions = this->RVA2RAW(imgExportDirectory.AddressOfFunctions);
-        aAddresses = reinterpret_cast<DWORD*>(reinterpret_cast<intptr_t>(lpBuffer) + addressOfFunctions);
-        aNamesRVA = reinterpret_cast<DWORD*>(reinterpret_cast<intptr_t>(lpBuffer) + this->RVA2RAW(imgExportDirectory.AddressOfNames));
-    }
+	if (verifyAddressBounds(imgExportDirectory.d.Name))
+	{
+		const char* addr = RVA2RAW(imgExportDirectory.d.Name) + (const char*)lpBuffer;
+		size_t len = strlen(addr);
+		strncpy_s(this->imgExportDirectory.szName,
+			addr, min(sizeof(this->imgExportDirectory.szName), len)
+		);
+	}
 
-    WORD byOrdinal = 0;
+	// Preparing name of exported module.
+	if (this->RVA2RAW(dwAddr) > this->sizeOfFile)
+	{
+		RETURN_ERROR2(ERROR_EAT_CORRUPTED);
+	}
 
-    // Iterating all exported functions from this module
-    for (f = 0; unsigned(f) < imgExportDirectory.NumberOfFunctions; f++)
-    {
-        ZeroMemory((void*)&expFunc, sizeof(expFunc));
+	size_t addressOfFunctions;
+	if (this->bMemoryAnalysis)
+	{
+		aOrdinals = (WORD*)(reinterpret_cast<intptr_t>(lpBuffer) + (imgExportDirectory.d.AddressOfNameOrdinals));
+		addressOfFunctions = (imgExportDirectory.d.AddressOfFunctions);
+		aAddresses = reinterpret_cast<DWORD*>(reinterpret_cast<intptr_t>(lpBuffer) + addressOfFunctions);
+		aNamesRVA = reinterpret_cast<DWORD*>(reinterpret_cast<intptr_t>(lpBuffer) + (imgExportDirectory.d.AddressOfNames));
+	}
+	else
+	{
+		aOrdinals = (WORD*)(reinterpret_cast<intptr_t>(lpBuffer) +
+			this->RVA2RAW(imgExportDirectory.d.AddressOfNameOrdinals));
+		addressOfFunctions = this->RVA2RAW(imgExportDirectory.d.AddressOfFunctions);
+		aAddresses = reinterpret_cast<DWORD*>(reinterpret_cast<intptr_t>(lpBuffer) + addressOfFunctions);
+		aNamesRVA = reinterpret_cast<DWORD*>(reinterpret_cast<intptr_t>(lpBuffer) + this->RVA2RAW(imgExportDirectory.d.AddressOfNames));
+	}
 
-        expFunc.bIsOrdinal = false;
-        expFunc.dwOrdinal = 0;
-        expFunc.uExportIndex = f;
+	WORD byOrdinal = 0;
 
-        if (static_cast<DWORD>(f) >= imgExportDirectory.NumberOfNames)
-        {
-            expFunc.bIsOrdinal = true;
-            expFunc.wOrdinal = byOrdinal + static_cast<WORD>(imgExportDirectory.Base);
-            byOrdinal++;
-        }
-        else
-        {
-            expFunc.wOrdinal = aOrdinals[f] + static_cast<WORD>(imgExportDirectory.Base);
-        }
+	// Iterating all exported functions from this module
+	for (f = 0; unsigned(f) < imgExportDirectory.d.NumberOfFunctions; f++)
+	{
+		ZeroMemory((void*)&expFunc, sizeof(expFunc));
 
-        wOrdinal = expFunc.wOrdinal;
-        size_t eatIndex = static_cast<DWORD>(wOrdinal) - imgExportDirectory.Base;
+		expFunc.bIsOrdinal = false;
+		expFunc.dwOrdinal = 0;
+		expFunc.uExportIndex = f;
 
-        if (this->bMemoryAnalysis)
-        {
-            if (!expFunc.bIsOrdinal)
-                dwNameRAW = (aNamesRVA[f]) + reinterpret_cast<intptr_t>(lpBuffer);
-            expFunc.dwPtrValue = (aAddresses[eatIndex]) + _moduleStartPos;
-        }
-        else
-        {
-            if (!expFunc.bIsOrdinal)
-                dwNameRAW = this->RVA2RAW(aNamesRVA[f]) + reinterpret_cast<intptr_t>(lpBuffer);
-            expFunc.dwPtrValue = this->RVA2RAW(aAddresses[eatIndex]) + reinterpret_cast<intptr_t>(lpBuffer);
-        }
+		if (static_cast<DWORD>(f) >= imgExportDirectory.d.NumberOfNames)
+		{
+			expFunc.bIsOrdinal = true;
+			expFunc.wOrdinal = byOrdinal + static_cast<WORD>(imgExportDirectory.d.Base);
+			byOrdinal++;
+		}
+		else
+		{
+			expFunc.wOrdinal = aOrdinals[f] + static_cast<WORD>(imgExportDirectory.d.Base);
+		}
 
-        expFunc.dwPtrValueRVA = aAddresses[eatIndex];
-        expFunc.dwThunkRVA = static_cast<DWORD>(addressOfFunctions + eatIndex * sizeof(DWORD));
+		wOrdinal = expFunc.wOrdinal;
+		size_t eatIndex = static_cast<DWORD>(wOrdinal) - imgExportDirectory.d.Base;
 
-        if ((dwNameRAW - offset) > this->sizeOfFile)
-            break;
+		if (this->bMemoryAnalysis)
+		{
+			if (!expFunc.bIsOrdinal)
+				dwNameRAW = (aNamesRVA[f]) + reinterpret_cast<intptr_t>(lpBuffer);
+			expFunc.dwPtrValue = (aAddresses[eatIndex]) + _moduleStartPos;
+		}
+		else
+		{
+			if (!expFunc.bIsOrdinal)
+				dwNameRAW = this->RVA2RAW(aNamesRVA[f]) + reinterpret_cast<intptr_t>(lpBuffer);
 
-        if (expFunc.bIsOrdinal)
-        {
-        }
-        else if (_HexChar(*((char*)dwNameRAW)) == '.') // Parsing name of an export thunk
-        {
-            expFunc.bIsOrdinal = true;
-        }
-        else
-        {
-            strncpy_s(expFunc.szFunction, (const char*)(dwNameRAW), sizeof(expFunc.szFunction) - 1);
-        }
+			ULONGLONG imageBase = GetImageBase();
+			expFunc.dwPtrValue = (aAddresses[eatIndex]) + (imageBase);
+		}
 
-        if (expFunc.dwPtrValueRVA > (codeSection->s.VirtualAddress + codeSection->s.SizeOfRawData))
-        {
-            // forwarder
-            expFunc.bIsForwarded = true;
-            const char* ptr = nullptr;
+		expFunc.dwPtrValueRVA = aAddresses[eatIndex];
+		expFunc.dwThunkRVA = static_cast<DWORD>(addressOfFunctions + eatIndex * sizeof(DWORD));
 
-            if (this->bMemoryAnalysis)
-            {
-                ptr = reinterpret_cast<const char*>(expFunc.dwPtrValueRVA + reinterpret_cast<intptr_t>(lpBuffer));
-            }
-            else
-            {
-                ptr = reinterpret_cast<const char*>(this->RVA2RAW(expFunc.dwPtrValueRVA) + reinterpret_cast<intptr_t>(lpBuffer));
-            }
+		if ((dwNameRAW - offset) > this->sizeOfFile)
+			break;
 
-            strncpy_s(expFunc.szForwarder, ptr, sizeof(expFunc.szForwarder));
-        }
+		if (expFunc.bIsOrdinal)
+		{
+		}
+		else if (_HexChar(*((char*)dwNameRAW)) == '.') // Parsing name of an export thunk
+		{
+			expFunc.bIsOrdinal = true;
+		}
+		else
+		{
+			strncpy_s(expFunc.szFunction, (const char*)(dwNameRAW), sizeof(expFunc.szFunction) - 1);
+		}
 
-        if (expFunc.dwPtrValue != 0) vExports.push_back(expFunc);
-    }
+		if (expFunc.dwPtrValueRVA > (codeSection->s.VirtualAddress + GetSafeSectionSize(*codeSection)))
+		{
+			// forwarder
+			expFunc.bIsForwarded = true;
+			const char* ptr = nullptr;
 
-    this->hasExports = true;
-    return TRUE;
+			if (this->bMemoryAnalysis)
+			{
+				ptr = reinterpret_cast<const char*>(expFunc.dwPtrValueRVA + reinterpret_cast<intptr_t>(lpBuffer));
+			}
+			else
+			{
+				ptr = reinterpret_cast<const char*>(this->RVA2RAW(expFunc.dwPtrValueRVA) + reinterpret_cast<intptr_t>(lpBuffer));
+			}
+
+			strncpy_s(expFunc.szForwarder, ptr, sizeof(expFunc.szForwarder));
+		}
+
+		if (expFunc.dwPtrValue != 0) vExports.push_back(expFunc);
+	}
+
+	this->hasExports = true;
+	return TRUE;
+}
+
+DWORD PE::GetSafeSectionSize(const __IMAGE_SECTION_HEADER& sect) const
+{
+	DWORD size = 0;
+
+	if (sect.s.SizeOfRawData > 0)
+	{
+		size = sect.s.SizeOfRawData;
+		if (size > sizeOfFile) size = sizeOfFile;
+	}
+	else
+	{
+		for (const auto& nextSect : vSections)
+		{
+			if (nextSect.s.PointerToRawData > sect.s.PointerToRawData)
+			{
+				size = nextSect.s.PointerToRawData - sect.s.PointerToRawData;
+				break;
+			}
+		}
+	}
+
+	return size;
 }
 
 bool PE::ParseRelocs()
@@ -1272,7 +1318,7 @@ bool PE::ParseRelocs()
         for (size_t u = 0; u < vSections.size(); u++)
         {
             auto ptr = vSections[u].s;
-            if (pIddRelocs->VirtualAddress >= ptr.VirtualAddress && pIddRelocs->VirtualAddress < (ptr.VirtualAddress + ptr.SizeOfRawData)) {
+			if (pIddRelocs->VirtualAddress >= ptr.VirtualAddress && pIddRelocs->VirtualAddress < (ptr.VirtualAddress + GetSafeSectionSize(vSections[u]))) {
                 sizeOfRelocsFromSectionTable = pIddRelocs->Size;
                 break;
             }
@@ -1289,12 +1335,12 @@ bool PE::ParseRelocs()
         }
     }
 
-    relocsSection.resize(dwSizeOfRelocs + 1);
-    memset(relocsSection.data(), 0, dwSizeOfRelocs + 1);
+    relocsSection.resize((size_t)dwSizeOfRelocs + 1);
+    memset(relocsSection.data(), 0, (size_t)dwSizeOfRelocs + 1);
 
     lpBuffer = relocsSection.data();
 
-    if (!ReadBytes(lpBuffer, dwSizeOfRelocs, fileAddr, File_Begin))
+    if (!ReadBytes(lpBuffer, dwSizeOfRelocs, fileAddr, AccessMethod::File_Begin))
     {
         READ_FAIL;
     }
@@ -1433,7 +1479,7 @@ bool PE::ParseResources()
         for (size_t u = 0; u < vSections.size(); u++)
         {
             auto ptr = vSections[u].s;
-            if (pIddResources->VirtualAddress >= ptr.VirtualAddress && pIddResources->VirtualAddress < (ptr.VirtualAddress + ptr.SizeOfRawData)) {
+			if (pIddResources->VirtualAddress >= ptr.VirtualAddress && pIddResources->VirtualAddress < (ptr.VirtualAddress + GetSafeSectionSize(vSections[u]))) {
                 sizeOfResourcesFromSectionTable = pIddResources->Size;
                 break;
             }
@@ -1452,12 +1498,12 @@ bool PE::ParseResources()
 
     std::vector<uint8_t> resourcesSection;
 
-    resourcesSection.resize(dwSizeOfResources + 1);
-    memset(resourcesSection.data(), 0, dwSizeOfResources + 1);
+    resourcesSection.resize((size_t)dwSizeOfResources + 1);
+    memset(resourcesSection.data(), 0, (size_t)dwSizeOfResources + 1);
 
     lpBuffer = resourcesSection.data();
 
-    if (!ReadBytes(resourcesSection.data(), dwSizeOfResources, fileAddr, File_Begin))
+    if (!ReadBytes(resourcesSection.data(), dwSizeOfResources, fileAddr, AccessMethod::File_Begin))
     {
         RETURN_ERROR2(ERROR_READ_LESS_THAN_SHOULD)
     }
@@ -1503,7 +1549,7 @@ bool PE::ApplyAllRelocs(ULONGLONG newImageBase)
     {
         for (auto reloc : imageReloc.relocs)
         {
-            const ULONGLONG fullRVA = imageReloc.baseRelocation.VirtualAddress + reloc.offset;
+            const ULONGLONG fullRVA = (size_t)imageReloc.baseRelocation.VirtualAddress + (size_t)reloc.offset;
             if (fullRVA >= this->sizeOfFile) continue;
 
             const size_t mapOffset = static_cast<size_t>(fullRVA);
@@ -1575,7 +1621,7 @@ bool PE::ApplyRelocsInBuffer(ULONGLONG newImageBase, ULONGLONG bufferRVA, uint8_
     {
         for (auto reloc : imageReloc.relocs)
         {
-            const ULONGLONG fullRVA = imageReloc.baseRelocation.VirtualAddress + reloc.offset;
+            const ULONGLONG fullRVA = (size_t)imageReloc.baseRelocation.VirtualAddress + (size_t)reloc.offset;
             const ULONGLONG upperBufferRVA = (bufferRVA + static_cast<ULONGLONG>(sizeOfBuffer));
 
             if (fullRVA >= bufferRVA && fullRVA < upperBufferRVA)
@@ -1751,28 +1797,28 @@ PE::CreateSection(DWORD dwSizeOfSection, DWORD dwDesiredAccess, const std::strin
     dwFileAlignment = (this->bIs86) ? imgNtHdrs32.OptionalHeader.FileAlignment : imgNtHdrs64.OptionalHeader.FileAlignment;
     dwSectionAlignment = (this->bIs86) ? imgNtHdrs32.OptionalHeader.SectionAlignment : imgNtHdrs64.OptionalHeader.SectionAlignment;
 
-    //dwNewVirtualAddress     =   (GetLastSection()->SizeOfRawData / dwSectionAlignment)
-    //                            * dwSectionAlignment + GetLastSection()->VirtualAddress;
+	//dwNewVirtualAddress     =   (GetSafeSectionSize(GetLastSection()) / dwSectionAlignment)
+	//                            * dwSectionAlignment + GetLastSection()->VirtualAddress;
 
-    dwNewVirtualAddress = GetLastSection().s.SizeOfRawData + GetLastSection().s.VirtualAddress;
+	dwNewVirtualAddress = GetSafeSectionSize(GetLastSection()) + GetLastSection().s.VirtualAddress;
 
-    // section name
-    if (szNameOfSection.size() < IMAGE_SIZEOF_SHORT_NAME)
-        strcpy_s(ish.s.Name, szNameOfSection.c_str());
-    else
-        memcpy((char*)ish.s.Name, szNameOfSection.c_str(), IMAGE_SIZEOF_SHORT_NAME);
+	// section name
+	if (szNameOfSection.size() < IMAGE_SIZEOF_SHORT_NAME)
+		strcpy_s(reinterpret_cast<char*>(ish.s.Name), sizeof(ish.s.Name), szNameOfSection.c_str());
+	else
+		memcpy((char*)ish.s.Name, szNameOfSection.c_str(), IMAGE_SIZEOF_SHORT_NAME);
 
-    ish.s.SizeOfRawData = dwSizeOfSection;
-    ish.s.VirtualAddress = dwNewVirtualAddress;
-    ish.s.Misc.VirtualSize = (dwSizeOfSection / dwFileAlignment + 1) * dwFileAlignment;
-    ish.s.Characteristics = dwDesiredAccess;
+	ish.s.SizeOfRawData = dwSizeOfSection;
+	ish.s.VirtualAddress = dwNewVirtualAddress;
+	ish.s.Misc.VirtualSize = (dwSizeOfSection / dwFileAlignment + 1) * dwFileAlignment;
+	ish.s.Characteristics = dwDesiredAccess;
 
-    //ish.PointerToRawData    =    GetLastSection()->PointerToRawData + GetLastSection()->SizeOfRawData;
-    ish.s.PointerToRawData = static_cast<DWORD>(this->sizeOfFile);
+	//ish.PointerToRawData    =    GetLastSection()->PointerToRawData + GetSafeSectionSize(GetLastSection());
+	ish.s.PointerToRawData = static_cast<DWORD>(this->sizeOfFile);
 
-    this->numOfNewSections++;
-    DWORD sectionSizeRounded = (dwSizeOfSection / dwSectionAlignment + 1) * dwSectionAlignment;
-    DWORD numOfSections;
+	this->numOfNewSections++;
+	DWORD sectionSizeRounded = (dwSizeOfSection / dwSectionAlignment + 1) * dwSectionAlignment;
+	DWORD numOfSections;
 
     if (this->bIs86)
     {
@@ -1862,11 +1908,11 @@ bool PE::AppendShellcode(BYTE* whereToReturn, uint8_t* shellcode, size_t sizeOfS
 
     if (this->bUseRVAInsteadOfRAW)
     {
-        bRes = WriteBytes(buf.data(), buf.size() - 1, imgNewSection->s.VirtualAddress, File_Begin);
+        bRes = WriteBytes(buf.data(), buf.size() - 1, imgNewSection->s.VirtualAddress, AccessMethod::File_Begin);
     }
     else
     {
-        bRes = WriteBytes(buf.data(), buf.size() - 1, imgNewSection->s.PointerToRawData, File_Begin);
+        bRes = WriteBytes(buf.data(), buf.size() - 1, imgNewSection->s.PointerToRawData, AccessMethod::File_Begin);
     }
 
     if (!bRes)
@@ -2018,9 +2064,9 @@ bool PE::ReadBytes(LPVOID lpBuffer, size_t dwSize, size_t dwOffset, AccessMethod
 
             switch (method)
             {
-            case File_Current: dwMethod = FILE_CURRENT; break;
-            case File_Begin: dwMethod = FILE_BEGIN; break;
-            case File_End:
+            case AccessMethod::File_Current: dwMethod = FILE_CURRENT; break;
+            case AccessMethod::File_Begin: dwMethod = FILE_BEGIN; break;
+            case AccessMethod::File_End:
             {
                 dwMethod = FILE_END;
                 offsetLow = -static_cast<LONG>(dwOffset);
@@ -2038,17 +2084,17 @@ bool PE::ReadBytes(LPVOID lpBuffer, size_t dwSize, size_t dwOffset, AccessMethod
     {
         dwLastOffs = static_cast<DWORD>(_dwCurrentOffset);
 
-        if (method != Arbitrary)
+        if (method != AccessMethod::Arbitrary)
         {
-            if (method == File_Current)
+            if (method == AccessMethod::File_Current)
             {
                 _dwCurrentOffset += dwOffset;
             }
-            else if (method == File_Begin)
+            else if (method == AccessMethod::File_Begin)
             {
                 _dwCurrentOffset = dwOffset;
             }
-            else if (method == File_End)
+            else if (method == AccessMethod::File_End)
             {
                 _dwCurrentOffset = sizeOfFile - dwOffset;
             }
@@ -2066,7 +2112,7 @@ bool PE::ReadBytes(LPVOID lpBuffer, size_t dwSize, size_t dwOffset, AccessMethod
         auto addr2 = _moduleStartPos + _dwCurrentOffset;
 
         RESOLVE_NO_UNHOOK(kernel32, ReadProcessMemory);
-        if (method == Arbitrary)
+        if (method == AccessMethod::Arbitrary)
         {
             changeProtection(reinterpret_cast<LPVOID>(_dwCurrentOffset), dwSize, PAGE_EXECUTE_READWRITE, &dwOldProtect);
 
@@ -2210,9 +2256,9 @@ bool PE::WriteBytes(LPVOID lpBuffer, size_t dwSize, size_t dwOffset, AccessMetho
 
             switch (method)
             {
-            case File_Current: dwMethod = FILE_CURRENT; break;
-            case File_Begin: dwMethod = FILE_BEGIN; break;
-            case File_End: dwMethod = FILE_END; break;
+            case AccessMethod::File_Current: dwMethod = FILE_CURRENT; break;
+            case AccessMethod::File_Begin: dwMethod = FILE_BEGIN; break;
+            case AccessMethod::File_End: dwMethod = FILE_END; break;
             default: dwMethod = FILE_BEGIN; break;
             }
 
@@ -2227,17 +2273,17 @@ bool PE::WriteBytes(LPVOID lpBuffer, size_t dwSize, size_t dwOffset, AccessMetho
     {
         dwLastOffs = static_cast<DWORD>(_dwCurrentOffset);
 
-        if (method != Arbitrary)
+        if (method != AccessMethod::Arbitrary)
         {
-            if (method == File_Current)
+            if (method == AccessMethod::File_Current)
             {
                 _dwCurrentOffset += dwOffset;
             }
-            else if (method == File_Begin)
+            else if (method == AccessMethod::File_Begin)
             {
                 _dwCurrentOffset = dwOffset;
             }
-            else if (method == File_End)
+            else if (method == AccessMethod::File_End)
             {
                 _dwCurrentOffset = sizeOfFile - dwOffset;
             }
@@ -2256,7 +2302,7 @@ bool PE::WriteBytes(LPVOID lpBuffer, size_t dwSize, size_t dwOffset, AccessMetho
         auto addr2 = _moduleStartPos + _dwCurrentOffset;
 
         RESOLVE_NO_UNHOOK(kernel32, WriteProcessMemory);
-        if (method == Arbitrary)
+        if (method == AccessMethod::Arbitrary)
         {
             changeProtection(reinterpret_cast<LPVOID>(_dwCurrentOffset), dwSize, PAGE_EXECUTE_READWRITE, &dwOldProtect);
             auto err = GetLastError();
@@ -2320,7 +2366,7 @@ bool PE::WriteBytes(LPVOID lpBuffer, size_t dwSize, size_t dwOffset, AccessMetho
             SetLastError(0);
         }
 
-        if (method != Arbitrary && (addr > reinterpret_cast<uintptr_t>(lpMapOfFile) || addr < (reinterpret_cast<uintptr_t>(lpMapOfFile) + sizeOfFile)))
+        if (method != AccessMethod::Arbitrary && (addr > reinterpret_cast<uintptr_t>(lpMapOfFile) || addr < (reinterpret_cast<uintptr_t>(lpMapOfFile) + sizeOfFile)))
         {
             if (reinterpret_cast<intptr_t>(lpMapOfFile) != _moduleStartPos) memcpy((LPVOID)(addr), lpBuffer, dwSize);
             sizeWritten = dwSize;
@@ -2392,9 +2438,11 @@ LPBYTE PE::MapFile()
     );
 
     if (_hMapOfFile == nullptr || ::GetLastError())
+    {
         RETURN_ERROR
+    }
 
-        _bAutoMapOfFile = true;
+    _bAutoMapOfFile = true;
 
     RESOLVE_NO_UNHOOK(kernel32, MapViewOfFile);
 
@@ -2557,6 +2605,7 @@ bool PE::AnalyseProcessModule(DWORD dwPID, HMODULE hModule, bool readOnly)
     this->bReadOnly = readOnly;
     this->analysisType = AnalysisType::MappedModule;
 
+
     DWORD flags = PROCESS_VM_READ | PROCESS_VM_OPERATION;
 
     if (!readOnly) flags |= PROCESS_VM_WRITE;
@@ -2578,10 +2627,10 @@ bool PE::AnalyseProcessModule(DWORD dwPID, HMODULE hModule, bool readOnly)
         RETURN_ERROR
     }
 
-    if (dwPID == 0)
+    if (dwPID == 0 || dwPID == GetCurrentProcessId())
     {
         MODULEINFO modInfo = { 0 };
-        if (!GetModuleInformation(this->hFileHandle, hModule, &modInfo, sizeof(modInfo)))
+        if (!GetModuleInformation(this->hFileHandle, hModule, &modInfo, sizeof(MODULEINFO)))
         {
             RETURN_ERROR
         }
@@ -2597,6 +2646,7 @@ bool PE::AnalyseProcessModule(DWORD dwPID, HMODULE hModule, bool readOnly)
         _dwCurrentOffset = 0;
         _selfProcessAnalysis = true;
         this->bIsValidPE = true;
+        this->_bAutoMapOfFile = false;
     }
     else
     {
@@ -2718,10 +2768,10 @@ bool PE::AnalyseProcessModule(DWORD dwPID, const std::string& szModule, bool rea
         this->hFileHandle = GetCurrentProcess();
         this->_selfProcessAnalysis = true;
         if (!szModule.empty()) dwPID = GetCurrentProcessId();
+        this->_bAutoMapOfFile = false;
     }
     else
     {
-
         RESOLVE_NO_UNHOOK(kernel32, OpenProcess);
         this->hFileHandle = _OpenProcess(flags, FALSE, dwPID);
     }
@@ -2985,7 +3035,7 @@ bool PE::ReadEntireModuleSafely(LPVOID lpBuffer, size_t dwSize, size_t dwOffset)
 
         auto test = address - dwOffset;
 
-        if (!ReadBytes(buf.data(), toRead, reinterpret_cast<size_t>(address), Arbitrary))
+        if (!ReadBytes(buf.data(), toRead, reinterpret_cast<size_t>(address), AccessMethod::Arbitrary))
         {
             memset(buf.data(), 0, toRead);
         }
@@ -3043,7 +3093,7 @@ ULONGLONG PE::HookIAT(const std::string& szImportThunk, ULONGLONG hookedVA)
         size_t whereToPatch = importDescriptor->d.FirstThunk + u * ptrSize;
 
         // Exact hooking
-        if (!WriteBytes(reinterpret_cast<LPVOID>(&hookedVA), ptrSize, whereToPatch, File_Begin))
+        if (!WriteBytes(reinterpret_cast<LPVOID>(&hookedVA), ptrSize, whereToPatch, AccessMethod::File_Begin))
         {
             WRITE_FAIL;
         }
@@ -3080,11 +3130,11 @@ DWORD PE::HookEAT(const std::string& szExportThunk, DWORD hookedRVA)
         size_t addressOfFunctions = 0;
         if (this->bMemoryAnalysis)
         {
-            addressOfFunctions = (this->imgExportDirectory.AddressOfFunctions);
+            addressOfFunctions = (this->imgExportDirectory.d.AddressOfFunctions);
         }
         else
         {
-            addressOfFunctions = this->RVA2RAW(this->imgExportDirectory.AddressOfFunctions);
+            addressOfFunctions = this->RVA2RAW(this->imgExportDirectory.d.AddressOfFunctions);
         }
 
         vExports[u].dwPtrValue = (vExports[u].dwPtrValue - vExports[u].dwThunkRVA) + hookedRVA;
@@ -3093,7 +3143,7 @@ DWORD PE::HookEAT(const std::string& szExportThunk, DWORD hookedRVA)
         size_t whereToPatch = addressOfFunctions + u * sizeof(DWORD);
 
         // Exact hooking
-        if (!WriteBytes(reinterpret_cast<LPVOID>(&hookedRVA), sizeof(DWORD), whereToPatch, File_Begin))
+        if (!WriteBytes(reinterpret_cast<LPVOID>(&hookedRVA), sizeof(DWORD), whereToPatch, AccessMethod::File_Begin))
         {
             WRITE_FAIL;
         }
@@ -3106,7 +3156,7 @@ DWORD PE::HookEAT(const std::string& szExportThunk, DWORD hookedRVA)
 
 std::vector<uint8_t> PE::ReadOverlay()
 {
-    const size_t pos = GetLastSection().s.PointerToRawData + GetLastSection().s.SizeOfRawData;
+	const size_t pos = (size_t)GetLastSection().s.PointerToRawData + (size_t)GetSafeSectionSize(GetLastSection());
 
     if (pos > sizeOfFile)
     {
@@ -3118,7 +3168,7 @@ std::vector<uint8_t> PE::ReadOverlay()
     std::shared_ptr<uint8_t> buffer(new uint8_t[num + 2]);
     memset(buffer.get(), 0, num + 2);
 
-    if (!ReadBytes(buffer.get(), num, pos, File_Begin))
+    if (!ReadBytes(buffer.get(), num, pos, AccessMethod::File_Begin))
     {
         return {};
     }
@@ -3128,8 +3178,8 @@ std::vector<uint8_t> PE::ReadOverlay()
 
 std::vector<uint8_t> PE::ReadSection(const __IMAGE_SECTION_HEADER& section)
 {
-    const size_t num = section.s.SizeOfRawData;
-    const size_t pos = (bMemoryAnalysis) ? section.s.VirtualAddress : section.s.PointerToRawData;
+	const size_t num = GetSafeSectionSize(section);
+	const size_t pos = (bMemoryAnalysis) ? section.s.VirtualAddress : section.s.PointerToRawData;
 
     if (pos > sizeOfFile)
     {
@@ -3140,7 +3190,7 @@ std::vector<uint8_t> PE::ReadSection(const __IMAGE_SECTION_HEADER& section)
     std::shared_ptr<uint8_t> buffer(new uint8_t[num + 2]);
     memset(buffer.get(), 0, num + 2);
 
-    if (!ReadBytes(buffer.get(), num, pos, File_Begin))
+    if (!ReadBytes(buffer.get(), num, pos, AccessMethod::File_Begin))
     {
         return {};
     }
@@ -3187,11 +3237,11 @@ bool PE::verifyAddressBounds(uintptr_t address, size_t lowerBoundary, size_t upp
             {
                 if (ptrSize == 4)
                 {
-                    addr2 = this->RVA2VA32(addr);
+                    addr2 = this->RVA2VA32((DWORD)addr);
                 }
                 else
                 {
-                    addr2 = this->RVA2VA64(addr);
+                    addr2 = this->RVA2VA64((DWORD)addr);
                 }
             }
 
@@ -3245,30 +3295,32 @@ std::vector<MEMORY_BASIC_INFORMATION> PE::collectProcessMemoryMap()
 
 void PE::adjustOptionalHeader()
 {
-    if (this->bIs86)
-    {
-        PIMAGE_OPTIONAL_HEADER32 phdr = &imgNtHdrs32.OptionalHeader;
-        phdr->SizeOfImage = this->vSections.back().s.VirtualAddress + this->vSections.back().s.Misc.VirtualSize;
-        phdr->SizeOfCode = phdr->SizeOfUninitializedData = phdr->SizeOfInitializedData = 0;
+	if (this->bIs86)
+	{
+		PIMAGE_OPTIONAL_HEADER32 phdr = &imgNtHdrs32.OptionalHeader;
+		phdr->SizeOfImage = this->vSections.back().s.VirtualAddress + this->vSections.back().s.Misc.VirtualSize;
+		phdr->SizeOfCode = phdr->SizeOfUninitializedData = phdr->SizeOfInitializedData = 0;
 
-        for (const auto& sect : this->vSections)
-        {
-            if (sect.s.Characteristics & IMAGE_SCN_CNT_CODE) phdr->SizeOfCode += sect.s.SizeOfRawData;
-            if (sect.s.Characteristics & IMAGE_SCN_CNT_INITIALIZED_DATA) phdr->SizeOfInitializedData += sect.s.SizeOfRawData;
-            if (sect.s.Characteristics & IMAGE_SCN_CNT_UNINITIALIZED_DATA) phdr->SizeOfUninitializedData += sect.s.SizeOfRawData;
-        }
-    }
-    else
-    {
-        PIMAGE_OPTIONAL_HEADER64 phdr = &imgNtHdrs64.OptionalHeader;
-        phdr->SizeOfImage = this->vSections.back().s.VirtualAddress + this->vSections.back().s.Misc.VirtualSize;
-        phdr->SizeOfCode = phdr->SizeOfUninitializedData = phdr->SizeOfInitializedData = 0;
+		for (const auto& sect : this->vSections)
+		{
+			auto sectSize = GetSafeSectionSize(sect);
+			if (sect.s.Characteristics & IMAGE_SCN_CNT_CODE) phdr->SizeOfCode += sectSize;
+			if (sect.s.Characteristics & IMAGE_SCN_CNT_INITIALIZED_DATA) phdr->SizeOfInitializedData += sectSize;
+			if (sect.s.Characteristics & IMAGE_SCN_CNT_UNINITIALIZED_DATA) phdr->SizeOfUninitializedData += sectSize;
+		}
+	}
+	else
+	{
+		PIMAGE_OPTIONAL_HEADER64 phdr = &imgNtHdrs64.OptionalHeader;
+		phdr->SizeOfImage = this->vSections.back().s.VirtualAddress + this->vSections.back().s.Misc.VirtualSize;
+		phdr->SizeOfCode = phdr->SizeOfUninitializedData = phdr->SizeOfInitializedData = 0;
 
-        for (const auto& sect : this->vSections)
-        {
-            if (sect.s.Characteristics & IMAGE_SCN_CNT_CODE) phdr->SizeOfCode += sect.s.SizeOfRawData;
-            if (sect.s.Characteristics & IMAGE_SCN_CNT_INITIALIZED_DATA) phdr->SizeOfInitializedData += sect.s.SizeOfRawData;
-            if (sect.s.Characteristics & IMAGE_SCN_CNT_UNINITIALIZED_DATA) phdr->SizeOfUninitializedData += sect.s.SizeOfRawData;
-        }
-    }
+		for (const auto& sect : this->vSections)
+		{
+			auto sectSize = GetSafeSectionSize(sect);
+			if (sect.s.Characteristics & IMAGE_SCN_CNT_CODE) phdr->SizeOfCode += sectSize;
+			if (sect.s.Characteristics & IMAGE_SCN_CNT_INITIALIZED_DATA) phdr->SizeOfInitializedData += sectSize;
+			if (sect.s.Characteristics & IMAGE_SCN_CNT_UNINITIALIZED_DATA) phdr->SizeOfUninitializedData += sectSize;
+		}
+	}
 }
