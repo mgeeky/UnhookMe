@@ -541,7 +541,7 @@ size_t PE::RVA2RAW(size_t dwRVA, bool bForce) const
     for (size_t i = 0; i < dwSections; i++)
     {
         if (dwRVA >= vSections[i].s.VirtualAddress &&
-            dwRVA < ((size_t)vSections[i].s.VirtualAddress
+            dwRVA <= ((size_t)vSections[i].s.VirtualAddress
                 + (size_t)vSections[i].s.Misc.VirtualSize)) {
             dwRAW = dwRVA - vSections[i].s.VirtualAddress
                 + vSections[i].s.PointerToRawData;
