@@ -11,8 +11,6 @@
 #include "PE.h"
 #include "usings.h"
 
-#include "ADVobfuscator\MetaString.h"
-
 #pragma warning(disable: 6387)
 #pragma warning(disable: 4005)
 
@@ -20,21 +18,15 @@
 // Helper macrodefintions to easily plug ADVobfuscator/MetaString.h
 // 
 
-#ifndef _DEBUG
-    #define OBF(x) ADV_OBF_W(x)
-    #define OBFI(x) ADV_OBF_W(x)
-    #define OBF_ASCII(x) ADV_OBF(x)
-    #define OBFI_ASCII(x) ADV_OBF(x)
-#else
-    #define OBF(x) x
-    #define OBFI(x) x
-    #define OBF_ASCII(x) x
-    #define OBFI_ASCII(x) x
-    #define ADV_OBF(x) x
-    #define ADV_OBF_W(x) x
-    #define OBF_WSTR(x) std::wstring(x)
-    #define OBF_STR(x) std::string(x)
-#endif
+
+#define OBF(x) x
+#define OBFI(x) x
+#define OBF_ASCII(x) x
+#define OBFI_ASCII(x) x
+#define ADV_OBF(x) x
+#define ADV_OBF_W(x) x
+#define OBF_WSTR(x) std::wstring(x)
+#define OBF_STR(x) std::string(x)
 
 /*
     In order to use Resolver a function pointer type must be first declared

@@ -15,7 +15,7 @@ namespace UnhookingImportResolver
 
 	bool globalQuietOption = true;
 	bool globalVerboseOption = false;
-	bool globalAntiSplicingOption = false;
+	bool globalAntiSplicingOption = true;
 
 	ImportResolverCache<std::string> UnhookingImportResolver::globalResolverCache;
 
