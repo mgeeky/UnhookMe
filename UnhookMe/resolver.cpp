@@ -15,83 +15,13 @@ namespace UnhookingImportResolver
 
 	bool globalQuietOption = true;
 	bool globalVerboseOption = false;
-	bool globalAntiSplicingOption = true;
-
-	wchar_t globalLogFilePath[MAX_PATH] = L"";
-
+	bool globalAntiSplicingOption = false;
 
 	ImportResolverCache<std::string> UnhookingImportResolver::globalResolverCache;
-
 
 	void die()
 	{
 		::ExitProcess(0);
-	}
-
-	void _output(bool verbose, const std::string& out)
-	{
-		if (UnhookingImportResolver::globalQuietOption) return;
-
-		DWORD written = 0;
-
-		static auto _WriteFile = reinterpret_cast<fn_WriteFile*>(::GetProcAddress(
-			GetModuleHandleW(L"kernel32.dll"),
-			ADV_OBF("WriteFile")
-		));
-
-		if (UnhookingImportResolver::globalLogFilePath[0] != L'\0' 
-			&& UnhookingImportResolver::globalLogFilePath[0] != L'-')
-		{
-			static auto _CreateFileW = reinterpret_cast<fn_CreateFileW*>(::GetProcAddress(
-				GetModuleHandleW(L"kernel32.dll"),
-				ADV_OBF("CreateFileW")
-			));
-
-			HANDLE hFile = _CreateFileW(
-				UnhookingImportResolver::globalLogFilePath,
-				FILE_APPEND_DATA,
-				FILE_SHARE_READ | FILE_SHARE_WRITE,
-				NULL,
-				OPEN_ALWAYS,
-				FILE_ATTRIBUTE_NORMAL,
-				NULL
-			);
-
-			if (hFile != INVALID_HANDLE_VALUE && hFile != NULL)
-			{
-				static auto _SetFilePointer = reinterpret_cast<fn_SetFilePointer*>(::GetProcAddress(
-					GetModuleHandleW(L"kernel32.dll"),
-					ADV_OBF("SetFilePointer")
-				));
-
-				_SetFilePointer(
-					hFile,
-					0,
-					nullptr,
-					FILE_END
-				);
-
-				_WriteFile(
-					hFile,
-					out.c_str(),
-					static_cast<DWORD>(out.size()),
-					&written,
-					nullptr
-				);
-
-				CloseHandle(hFile);
-			}
-		}
-		else
-		{
-			_WriteFile(
-				GetStdHandle(static_cast<DWORD>(-11) /* STD_OUTPUT_HANDLE */),
-				out.c_str(),
-				static_cast<DWORD>(out.size()),
-				&written,
-				nullptr
-			);
-		}
 	}
 
 	std::wstring adjustPath(const std::wstring& szPath)
@@ -114,7 +44,6 @@ namespace UnhookingImportResolver
 		out = _adjustPath(OBFI(L"..\\") + szPath + OBFI(L".dll"));
 		if (!out.empty()) return out;
 
-		info(OBF(L"[!] Specified file ("), szPath, OBF(L") does not exist in CWD, Windows or Windows\\System32!"));
 		die();
 		return L"";
 	}
