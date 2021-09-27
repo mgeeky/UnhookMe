@@ -158,6 +158,17 @@ class PE
 
 public:
 
+    struct HookTrampolineBuffers
+    {
+        // (Input) Buffer containing bytes that should be restored while unhooking.
+        BYTE* originalBytes;
+        DWORD originalBytesSize;
+
+        // (Output) Buffer that will receive bytes present prior to trampoline installation/restoring.
+        BYTE* previousBytes;
+        DWORD previousBytesSize;
+    };
+
     enum class AccessMethod
     {
         Arbitrary = 0,
@@ -294,6 +305,7 @@ public:
     bool AnalyseFile(const std::wstring& _szFileName, bool readOnly, bool _bIsValidPEImage = true)
     {
         std::string _name(_szFileName.begin(), _szFileName.end());
+        _filePath = _szFileName;
         return AnalyseFile(_name, readOnly, _bIsValidPEImage);
     }
 
@@ -305,6 +317,7 @@ public:
         this->bReadOnly = readOnly;
         this->bIsValidPE = _bIsValidPEImage;
         this->analysisType = AnalysisType::File;
+        _filePath = std::wstring(_szFileName.begin(), _szFileName.end());
 
         return PE::LoadFile();
     }
@@ -339,23 +352,27 @@ public:
     // In such case, prefer dwAddress over expected ImageBase while calculating RVAs/VAs.
     // use isMapped=True if you plan to analyse memory mapped(or ordinarly loaded) PE module such as EXE/DLL,
     // or isMapped=False for PIC shellcode acting as a Reflective DLL injected one or PE-to-shellcode converted.
-    bool AnalyseMemory(DWORD dwPID, LPBYTE dwAddress, size_t dwSize, bool readOnly, bool isMapped);
+    // If adjustMemoryProtections is true, will iterate over memory pool and set R/RW pages wherever no Read/RW is applied.
+    bool AnalyseMemory(DWORD dwPID, LPBYTE dwAddress, size_t dwSize, bool readOnly, bool isMapped, bool adjustMemoryProtections = false);
 
     // Below methods performs module analysis from specified process memory.
     // This works by reading process memory and parsing/analysing it.
-    bool AnalyseProcessModule(DWORD dwPID, HMODULE hModule, bool readOnly);
+    // If adjustMemoryProtections is true, will iterate over memory pool and set R/RW pages wherever no Read/RW is applied.
+    bool AnalyseProcessModule(DWORD dwPID, HMODULE hModule, bool readOnly, bool adjustMemoryProtections = false);
 
     // This method performs process module analysis. Actually, it opens process,
     // enumerates process modules and compares it with the szModule name. Afterwards,
     // it sets module handle and launches analysis. By specifying szModule to nullptr user can
     // perform dwPID process analysis instead of one of it's modules.
-    bool AnalyseProcessModule(DWORD dwPID, const std::wstring& szModule, bool readOnly)
+    // If adjustMemoryProtections is true, will iterate over memory pool and set R/RW pages wherever no Read/RW is applied.
+    bool AnalyseProcessModule(DWORD dwPID, const std::wstring& szModule, bool readOnly, bool adjustMemoryProtections = false)
     {
         std::string n(szModule.begin(), szModule.end());
-        return AnalyseProcessModule(dwPID, n, readOnly);
+        return AnalyseProcessModule(dwPID, n, readOnly, adjustMemoryProtections);
     }
 
-    bool AnalyseProcessModule(DWORD dwPID, const std::string& szModule, bool readOnly);
+    bool AnalyseProcessModule(DWORD dwPID, const std::string& szModule, bool readOnly, bool adjustMemoryProtections = false);
+
 
     // Simple wrapper to _AnalyseProcessModule for quick process analysis
     bool AnalyseProcess(DWORD dwPID, bool readOnly) { return this->AnalyseProcessModule(dwPID, "", readOnly); }
@@ -366,9 +383,13 @@ public:
     // if possible performs EAT parsing. Whole PE image analysis is beginning there.
     bool LoadFile();
 
+    bool getImport(const char* functionName, IMPORTED_FUNCTION* func);
+    bool getExport(const char* exportFunction, EXPORTED_FUNCTION* func);
+
     // I/O - read/writes opened file/process (PE::_hFileHandle) and returns
-    bool ReadBytes(LPVOID, size_t dwSize, size_t dwOffset = 0, AccessMethod method = AccessMethod::File_Current, bool dontRestoreFilePointer = false);
-    bool WriteBytes(LPVOID, size_t dwSize, size_t dwOffset = 0, AccessMethod method = AccessMethod::File_Current, bool dontRestoreFilePointer = false);
+    bool ReadBytes(LPVOID, size_t dwSize, size_t dwOffset = 0, enum class AccessMethod method = AccessMethod::File_Current, bool dontRestoreFilePointer = false);
+    bool WriteBytes(LPVOID, size_t dwSize, size_t dwOffset = 0, enum class AccessMethod method = AccessMethod::File_Current, bool dontRestoreFilePointer = false);
+
 
     std::vector<uint8_t> ReadOverlay();
     std::vector<uint8_t> ReadSection(const __IMAGE_SECTION_HEADER& section);
@@ -386,6 +407,8 @@ public:
     // be previous thunk EntryPoint address.
     ULONGLONG HookIAT(const std::string& szImportThunk, ULONGLONG hookedVA);
     DWORD     HookEAT(const std::string& szExportThunk, DWORD hookedRVA);
+    bool      HookTrampoline(bool installHook, LPVOID address, LPVOID jumpAddress, HookTrampolineBuffers* buffers = NULL);
+
 
     // Creates image section and appends it to the PE::pSectionHdrs table
     __IMAGE_SECTION_HEADER CreateSection(DWORD dwSizeOfSection, DWORD dwDesiredAccess, const std::string& szNameOfSection);
@@ -438,7 +461,7 @@ private:
 
 	void _initVars()
 	{
-		_bHasOverlay = _bIsFileMapped = _bIsIATFilled = bUseRVAInsteadOfRAW = bMemoryAnalysis = _selfProcessAnalysis = false;
+        _bHasOverlay = _bIsFileMapped = _bIsIATFilled = bUseRVAInsteadOfRAW = bMemoryAnalysis = _selfProcessAnalysis = _bAutoMapOfFile = false;
 		numOfNewSections = sizeOfFile = _dwCurrentOffset = _dwLastError = dwPID = 0;
 		_hMapOfFile = hFileHandle = (HANDLE)INVALID_HANDLE_VALUE;
 		lpMapOfFile = nullptr;
@@ -506,8 +529,14 @@ private:
     std::vector<MEMORY_BASIC_INFORMATION>
                 collectProcessMemoryMap();
 
+    bool        _LoadFile();
+    bool        accomodateMemoryPagesForAccess(
+        bool accomodateOrRestore, HMODULE hModule, std::vector<MEMORY_BASIC_INFORMATION>& origMemoryMap);
+
 
     /************************************/
+
+    std::wstring _filePath;
 
     bool        bIs86;
 
@@ -530,4 +559,6 @@ private:
     bool        _bAutoMapOfFile;
     bool        _selfProcessAnalysis;
     bool        _bHasOverlay;
+    bool        adjustMemoryProtections;
+
 };

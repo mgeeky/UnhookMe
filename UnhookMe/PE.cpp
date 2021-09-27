@@ -96,6 +96,24 @@ ULONGLONG PE::GetIB64() const
 
 bool PE::LoadFile()
 {
+    if (this->bMemoryAnalysis && adjustMemoryProtections)
+    {
+        std::vector<MEMORY_BASIC_INFORMATION> pages;
+        if (accomodateMemoryPagesForAccess(true, (HMODULE)this->lpMapOfFile, pages))
+        {
+            bool ret = _LoadFile();
+
+            accomodateMemoryPagesForAccess(false, (HMODULE)this->lpMapOfFile, pages);
+
+            return ret;
+        }
+    }
+
+    return _LoadFile();
+}
+
+bool PE::_LoadFile()
+{
     // Fix file path
     trimQuote(szFileName);
 
@@ -414,6 +432,50 @@ bool PE::LoadFile()
     this->_bHasOverlay = (sizeOfFile > endOfPEData);
 
     return TRUE;
+}
+
+bool PE::getImport(const char* functionName, IMPORTED_FUNCTION* func)
+{
+    if (vImports.empty())
+        return false;
+
+    auto importEntry = std::find_if(
+        vImports.begin(),
+        vImports.end(),
+        [&functionName](const IMPORTED_FUNCTION& f) {
+            return (!strcmp(f.szFunction, functionName));
+        }
+    );
+
+    if (importEntry != vImports.end())
+    {
+        *func = *importEntry;
+        return true;
+    }
+
+    return false;
+}
+
+bool PE::getExport(const char* exportFunction, EXPORTED_FUNCTION* func)
+{
+    if (vExports.empty())
+        return false;
+
+    auto exportEntry = std::find_if(
+        vExports.begin(),
+        vExports.end(),
+        [&exportFunction](const EXPORTED_FUNCTION& f) {
+            return (!strcmp(f.szFunction, exportFunction));
+        }
+    );
+
+    if (exportEntry != vExports.end())
+    {
+        *func = *exportEntry;
+        return true;
+    }
+
+    return false;
 }
 
 bool PE::_OpenFile()
@@ -2023,7 +2085,7 @@ bool PE::changeProtection(LPVOID address, size_t size, DWORD newProtection, LPDW
         this->hFileHandle,
         address,
         static_cast<DWORD>(size),
-        PAGE_READWRITE,
+        newProtection,
         &_oldProtection
     );
 
@@ -2470,7 +2532,7 @@ inline char PE::_HexChar(int c)
 }
 
 
-bool PE::AnalyseMemory(DWORD dwPID, LPBYTE dwAddress, size_t dwSize, bool readOnly, bool isMapped)
+bool PE::AnalyseMemory(DWORD dwPID, LPBYTE dwAddress, size_t dwSize, bool readOnly, bool isMapped, bool adjustMemoryProtections)
 {
     this->bUseRVAInsteadOfRAW = this->bIsValidPE =
         this->_bIsFileMapped = this->bMemoryAnalysis = true;
@@ -2479,6 +2541,7 @@ bool PE::AnalyseMemory(DWORD dwPID, LPBYTE dwAddress, size_t dwSize, bool readOn
     this->bPreferBaseAddressThanImageBase = !isMapped;
     this->_bAutoMapOfFile = false;
     this->bReadOnly = readOnly;
+    this->adjustMemoryProtections = adjustMemoryProtections;
 
     if (isMapped) this->analysisType = AnalysisType::MappedModule;
     else this->analysisType = AnalysisType::Memory;
@@ -2586,6 +2649,8 @@ bool PE::AnalyseMemory(DWORD dwPID, LPBYTE dwAddress, size_t dwSize, bool readOn
     strncpy_s(fileName, MAX_PATH, szFileName.c_str(), MAX_PATH);
 
     GetModuleFileNameA(GetModuleHandle(nullptr), fileName, sizeof szFileName);
+    
+    _filePath = std::wstring(&fileName[0], &fileName[strlen(fileName)]);
 
     SetLastError(0);
     _dwLastError = 0;
@@ -2596,7 +2661,7 @@ bool PE::AnalyseMemory(DWORD dwPID, LPBYTE dwAddress, size_t dwSize, bool readOn
 ///////////////////////////////////////////////////////////////////////////////////////
 // Launches process module analysis by specifying desired module HMODULE handle
 
-bool PE::AnalyseProcessModule(DWORD dwPID, HMODULE hModule, bool readOnly)
+bool PE::AnalyseProcessModule(DWORD dwPID, HMODULE hModule, bool readOnly, bool adjustMemoryProtections)
 {
     this->bMemoryAnalysis = true;
     this->_bIsFileMapped = true;
@@ -2604,7 +2669,7 @@ bool PE::AnalyseProcessModule(DWORD dwPID, HMODULE hModule, bool readOnly)
     this->bUseRVAInsteadOfRAW = true;
     this->bReadOnly = readOnly;
     this->analysisType = AnalysisType::MappedModule;
-
+    this->adjustMemoryProtections = adjustMemoryProtections;
 
     DWORD flags = PROCESS_VM_READ | PROCESS_VM_OPERATION;
 
@@ -2627,28 +2692,32 @@ bool PE::AnalyseProcessModule(DWORD dwPID, HMODULE hModule, bool readOnly)
         RETURN_ERROR
     }
 
+    bool found = false;
     if (dwPID == 0 || dwPID == GetCurrentProcessId())
     {
         MODULEINFO modInfo = { 0 };
-        if (!GetModuleInformation(this->hFileHandle, hModule, &modInfo, sizeof(MODULEINFO)))
+        if (GetModuleInformation(this->hFileHandle, hModule, &modInfo, sizeof(MODULEINFO)))
         {
-            RETURN_ERROR
+
+            this->lpMapOfFile = reinterpret_cast<LPBYTE>(modInfo.lpBaseOfDll);
+            if (this->lpMapOfFile == nullptr)
+            {
+                RETURN_ERROR
+            }
+
+            sizeOfFile = modInfo.SizeOfImage;
+            _moduleStartPos = reinterpret_cast<intptr_t>(modInfo.lpBaseOfDll);
+            _dwCurrentOffset = 0;
+            _selfProcessAnalysis = true;
+            this->bIsValidPE = true;
+            this->_bAutoMapOfFile = false;            
+            found = true;
         }
 
-        this->lpMapOfFile = reinterpret_cast<LPBYTE>(modInfo.lpBaseOfDll);
-        if (this->lpMapOfFile == nullptr)
-        {
-            RETURN_ERROR
-        }
-
-        sizeOfFile = modInfo.SizeOfImage;
-        _moduleStartPos = reinterpret_cast<intptr_t>(modInfo.lpBaseOfDll);
-        _dwCurrentOffset = 0;
-        _selfProcessAnalysis = true;
-        this->bIsValidPE = true;
-        this->_bAutoMapOfFile = false;
+        SetLastError(0);
     }
-    else
+
+    if (!found)
     {
         if (this->hFileHandle == nullptr || ::GetLastError())
         {
@@ -2688,6 +2757,12 @@ bool PE::AnalyseProcessModule(DWORD dwPID, HMODULE hModule, bool readOnly)
                 break;
             }
 
+            if (hModulePtr > modBase && hModulePtr < (modBase + me32.modBaseSize))
+            {
+                found = true;
+                break;
+            }
+
             if (!_Module32NextW(hSnap, &me32))
             {
                 if (::GetLastError() != ERROR_NO_MORE_FILES)
@@ -2702,6 +2777,8 @@ bool PE::AnalyseProcessModule(DWORD dwPID, HMODULE hModule, bool readOnly)
         if (found)
         {
             auto a = std::wstring(me32.szExePath);
+            _filePath = a;
+
             szFileName = std::string(a.begin(), a.end());
             this->bIsValidPE = true;
 
@@ -2722,6 +2799,8 @@ bool PE::AnalyseProcessModule(DWORD dwPID, HMODULE hModule, bool readOnly)
                 {
                     RETURN_ERROR2(ERROR_READ_LESS_THAN_SHOULD)
                 }
+
+                this->adjustMemoryProtections = false;
             }
             else
             {
@@ -2746,7 +2825,7 @@ bool PE::AnalyseProcessModule(DWORD dwPID, HMODULE hModule, bool readOnly)
 ///////////////////////////////////////////////////////////////////////////////////////
 // Launches process module analysis by specifying desired module name/path
 
-bool PE::AnalyseProcessModule(DWORD dwPID, const std::string& szModule, bool readOnly)
+bool PE::AnalyseProcessModule(DWORD dwPID, const std::string& szModule, bool readOnly, bool adjustMemoryProtections)
 {
     this->bMemoryAnalysis = true;
     this->_bIsFileMapped = true;
@@ -2754,6 +2833,7 @@ bool PE::AnalyseProcessModule(DWORD dwPID, const std::string& szModule, bool rea
     this->bUseRVAInsteadOfRAW = true;
     this->bReadOnly = readOnly;
     this->analysisType = AnalysisType::MappedModule;
+    this->adjustMemoryProtections = adjustMemoryProtections;
 
     std::wstring desiredModuleName;
     size_t desiedModuleSize = 0;
@@ -2960,6 +3040,8 @@ bool PE::AnalyseProcessModule(DWORD dwPID, const std::string& szModule, bool rea
     if (!desiredModuleName.empty() && desiredModuleBaseAddress != nullptr && desiedModuleSize != 0)
     {
         auto a = std::wstring(desiredModuleName);
+        _filePath = desiredModuleName;
+
         szFileName = std::string(a.begin(), a.end());
 
         this->bIsValidPE = true;
@@ -2981,6 +3063,7 @@ bool PE::AnalyseProcessModule(DWORD dwPID, const std::string& szModule, bool rea
                 RETURN_ERROR2(ERROR_READ_LESS_THAN_SHOULD)
             }
 
+            this->adjustMemoryProtections = false;
             _dwCurrentOffset = 0;
         }
         else
@@ -3059,6 +3142,8 @@ bool PE::ReadEntireModuleSafely(LPVOID lpBuffer, size_t dwSize, size_t dwOffset)
 
 std::string& PE::trimQuote(std::string& path) const
 {
+    if (path.empty()) return path;
+
     path.erase(
         std::remove(path.begin(), path.end(), '\"'),
         path.end()
@@ -3154,6 +3239,77 @@ DWORD PE::HookEAT(const std::string& szExportThunk, DWORD hookedRVA)
     return 0;
 }
 
+bool PE::HookTrampoline(bool installHook, LPVOID address, LPVOID jumpAddress, HookTrampolineBuffers* buffers)
+{
+#ifdef _WIN64
+    uint8_t trampoline[] = {
+        0x49, 0xBA, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // mov r10, addr
+        0x41, 0xFF, 0xE2                                            // jmp r10
+    };
+
+    uint64_t addr = (uint64_t)(jumpAddress);
+    memcpy(&trampoline[2], &addr, sizeof(addr));
+#else
+    uint8_t trampoline[] = {
+        0xB8, 0x00, 0x00, 0x00, 0x00,     // mov eax, addr
+        0xFF, 0xE0                        // jmp eax
+    };
+
+    uint32_t addr = (uint32_t)(jumpAddress);
+    memcpy(&trampoline[1], &addr, sizeof(addr));
+#endif
+
+    size_t offset = (ULONG_PTR)address - (ULONG_PTR)this->lpMapOfFile;
+
+    if (installHook)
+    {
+        if (buffers != NULL)
+        {
+            if (buffers->previousBytes != NULL && buffers->previousBytesSize > 0)
+            {
+                ReadBytes(buffers->previousBytes, buffers->previousBytesSize, offset, AccessMethod::File_Begin);
+            }
+        }
+
+        return WriteBytes(trampoline, sizeof(trampoline), offset, AccessMethod::File_Begin);
+    }
+    else
+    {
+        if (buffers != NULL)
+        {
+            if ((buffers->originalBytes != NULL && buffers->originalBytesSize == 0) || (buffers->originalBytes == NULL && buffers->originalBytesSize > 0))
+                return false;
+
+            if (buffers->originalBytesSize > 0 && buffers->originalBytes != NULL)
+            {
+                return WriteBytes(buffers->originalBytes, buffers->originalBytesSize, offset, AccessMethod::File_Begin);
+            }
+        }
+
+        if (!bMemoryAnalysis)
+            return false;
+
+        if (_filePath.size() == 0)
+            return false;
+
+        PE mod;
+        if (!mod.AnalyseFile(_filePath, true))
+            return false;
+
+        char origBytes[sizeof(trampoline)] = { 0 };
+
+        if (!mod.ReadBytes(origBytes, sizeof(origBytes), mod.RVA2RAW(offset), AccessMethod::File_Begin))
+        {
+            mod.close();
+            return false;
+        }
+
+        mod.close();
+
+        return WriteBytes(origBytes, sizeof(origBytes), offset, AccessMethod::File_Begin);
+    }
+}
+
 std::vector<uint8_t> PE::ReadOverlay()
 {
 	const size_t pos = (size_t)GetLastSection().s.PointerToRawData + (size_t)GetSafeSectionSize(GetLastSection());
@@ -3245,6 +3401,35 @@ bool PE::verifyAddressBounds(uintptr_t address, size_t lowerBoundary, size_t upp
                 }
             }
 
+            try
+            {
+                for (size_t i = addr2; i < upperBoundary; i += sizeof(ULONG_PTR))
+                {
+                    char* ptr = (char*)i;
+                    DWORD a = *ptr;
+                }
+
+                return true;
+            }
+            catch (...)
+            {
+                return false;
+            }
+            /*
+            size_t addr2 = addr;
+
+            if (relative)
+            {
+                if (ptrSize == 4)
+                {
+                    addr2 = this->RVA2VA32((DWORD)addr);
+                }
+                else
+                {
+                    addr2 = this->RVA2VA64((DWORD)addr);
+                }
+            }
+
             auto memoryMap = collectProcessMemoryMap();
             for (const auto& m : memoryMap)
             {
@@ -3252,12 +3437,14 @@ bool PE::verifyAddressBounds(uintptr_t address, size_t lowerBoundary, size_t upp
                     && addr2 < (reinterpret_cast<uintptr_t>(m.BaseAddress) + m.RegionSize))
                 {
                     if ((m.Protect & PAGE_READONLY) == 0 && (m.Protect & PAGE_EXECUTE_READWRITE) == 0 &&
-                        (m.Protect & PAGE_READWRITE) == 0)
+                        (m.Protect & PAGE_READWRITE) == 0 && (m.Protect & PAGE_EXECUTE_READ) == 0)
                     {
                         return false;
                     }
                 }
             }
+        */
+
         }
         else
         {
@@ -3323,4 +3510,58 @@ void PE::adjustOptionalHeader()
 			if (sect.s.Characteristics & IMAGE_SCN_CNT_UNINITIALIZED_DATA) phdr->SizeOfUninitializedData += sectSize;
 		}
 	}
+}
+
+bool PE::accomodateMemoryPagesForAccess(bool accomodateOrRestore, HMODULE hModule, std::vector<MEMORY_BASIC_INFORMATION>& origMemoryMap)
+{
+    DWORD old = 0;
+    RESOLVE_NO_UNHOOK(kernel32, VirtualProtect);
+
+    if (!accomodateOrRestore)
+    {
+        for (const auto& mbi : origMemoryMap)
+        {
+            _VirtualProtect(mbi.BaseAddress, mbi.RegionSize, mbi.Protect, &old);
+        }
+
+        return true;
+    }
+
+    DWORD sizeOfImage = sizeOfFile;
+    std::vector<MEMORY_BASIC_INFORMATION> out;
+
+    uint8_t* address = (uint8_t*)hModule;
+    while (reinterpret_cast<size_t>(address) < ((ULONG_PTR)hModule + sizeOfImage))
+    {
+        MEMORY_BASIC_INFORMATION mbi = { 0 };
+
+        RESOLVE_NO_UNHOOK(kernel32, VirtualQuery);
+        if (!VirtualQuery(address, &mbi, sizeof(mbi)))
+        {
+            break;
+        }
+
+        DWORD newProt = 0;
+
+        if ((mbi.Protect & PAGE_EXECUTE_READWRITE) == 0 && (mbi.Protect & PAGE_EXECUTE_READ) == 0
+            && (mbi.Protect & PAGE_READWRITE) == 0 && (mbi.Protect & PAGE_READONLY) == 0)
+        {
+            newProt = this->bReadOnly ? PAGE_EXECUTE_READ : PAGE_EXECUTE_READWRITE;
+        }
+
+        if (mbi.Protect & PAGE_GUARD)
+        {
+            newProt &= ~PAGE_GUARD;
+        }
+
+        if (newProt != 0)
+        {
+            _VirtualProtect(mbi.BaseAddress, mbi.RegionSize, newProt, &old);
+            out.push_back(mbi);
+        }
+
+        address += mbi.RegionSize;
+    }
+
+    return true;
 }
