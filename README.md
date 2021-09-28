@@ -143,6 +143,20 @@ The idea is following:
 Among the problems such dynamically-unhooking resolver faced are the issues with traversing forwarded APIs (a DLL may contain Export thunk saying that this function is not implemented in this module, but it is in another one) - which although this implementation has support for, sometimes it brokes its traversal logic.
 
 
-### Author
 
-Mariusz Banach / mgeeky (@mariuszbit)
+---
+
+### ☕ Show Support ☕
+
+This and other projects are outcome of sleepless nights and **plenty of hard work**. If you like what I do and appreciate that I always give back to the community,
+[Consider buying me a coffee](https://github.com/sponsors/mgeeky) _(or better a beer)_ just to say thank you! 💪 
+
+---
+
+## Author
+
+```   
+   Mariusz Banach / mgeeky, 21
+   <mb [at] binary-offensive.com>
+   (https://github.com/mgeeky)
+```
