@@ -267,7 +267,7 @@ namespace UnhookingImportResolver
             bool *_wasItHooked = nullptr
         )
             : unhook(_unhook), wasItHooked(_wasItHooked),
-            hModule(nullptr), dllNameShort("")
+            hModule(nullptr), dllNameShort()
         {
             std::transform(dllName.begin(), dllName.end(), dllName.begin(),
                 [](unsigned char c) { return std::tolower(c); });
@@ -622,7 +622,7 @@ namespace UnhookingImportResolver
                 auto path = split(dllName, std::string("\\"));
                 path.pop_back();
 
-                this->dllName = "";
+                this->dllName.clear();
                 for (auto p : path)
                 {
                     this->dllName += p + "\\";
@@ -657,7 +657,7 @@ namespace UnhookingImportResolver
                     auto _dllName = this->dllName;
                     auto _hModule = this->hModule;
 
-                    this->dllNameShort = moduleFwd;
+                    this->dllNameShort = std::move(moduleFwd);
                     this->dllName += this->dllNameShort;
                     this->hModule = LoadLibraryA(this->dllNameShort.c_str());
 
