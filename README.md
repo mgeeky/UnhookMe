@@ -5,7 +5,9 @@ In the era of intrusive AVs and EDRs that introduce hot-patches to the running p
 The solution I'm proposing here is to switch from using linker-resolved WinAPI imports, staying visibile in compiled executable's PE headers (Import Address Table specifically) to favor fully-dynamic approach insisting on resolving imports only in a dynamic fashion. Such dynamical resolver can be equipped with unhooking logic happening in the background, without any sort of guidance from the operator's side.
 
 
-### Simplest usage example
+---
+
+## Simplest usage example
 
 This is how you can ensure to call `MessageBoxW` unhooked, unmonitored:
 
@@ -16,7 +18,9 @@ This is how you can ensure to call `MessageBoxW` unhooked, unmonitored:
 
 All the magic happens within `RESOLVE` macrodefintion, that constructs `ImportResolver<T>` object named `_MessageBoxW`. 
 
-### Showcase
+---
+
+## Showcase
 
 ![Unhookme showcase animation](https://raw.githubusercontent.com/mgeeky/UnhookMe/master/apimonitor.gif)
 
@@ -39,8 +43,9 @@ In the meantime of popping message boxes, these are the loglines printed to cons
 [~] Resolved symbol user32.dll!MessageBoxW
 ```
 
+---
 
-### How to use it?
+## How to use it?
 
 There are in total 5 C++ source code/header files that your solution need to include. However your main program file needs to include only two required headers, as detailed below.
 
@@ -51,7 +56,7 @@ There are in total 5 C++ source code/header files that your solution need to inc
 * `PE.h` - custom PE parser header file
 
 
-#### Required headers
+### Required headers
 
 Your program will require only two headers being included:
 
@@ -60,7 +65,7 @@ Your program will require only two headers being included:
 #include "resolver.h"
 ```
 
-#### Global options
+### Global options
 
 There are couple of global options that can be changed affecting the way in which Resolver works or reports it's activity. These are defined in the very beginning of **`resolver.cpp`** file:
 
@@ -79,7 +84,7 @@ bool globalAntiSplicingOption = true;
 wchar_t globalLogFilePath[MAX_PATH] = L"";
 ```
 
-#### Custom API type specification
+### Custom API type specification
 
 In order to use Resolver a function pointer type must be first declared with `using` statement of strict form:
 
@@ -96,7 +101,7 @@ This repository comes with **`usings.h`** header file containing predefined usin
 The _FunctionName_ will correspond to the WinAPI that we want to have ImportResolver resolve and that function pointer must be marked as having WINAPI call convention ( `__stdcall` on x86 and `__fastcall` on x64). The _ReturnType_ must precede `WINAPI` type modifier.
 
 
-#### Function resolution and usage
+### Function resolution and usage
 
 Having function pointer type defined like specified above, we will be able to use it in the following manner:
 
@@ -132,7 +137,9 @@ Resolver's constructor:
         )
 ```
 
-### How does it work?
+---
+
+## How does it work?
 
 The underlaying resolver leverages custom PE headers parser, that processes every referenced DLL module to map their exports and verify that module's PE headers integrity as well as integrity of referenced function's stub bytes.
 
