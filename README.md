@@ -8,7 +8,7 @@ The solution I'm proposing here is to switch from using linker-resolved WinAPI i
 ### Showcase
 
 ![Unhookme showcase animation](https://raw.githubusercontent.com/mgeeky/UnhookMe/master/apimonitor.gif)
-![showcase animation](https://raw.githubusercontent.com/mgeeky/UnhookMe/7e139616780869bf439b76f291d9d10d12e086f7/apimonitor.gif)
+
 
 Here's how `UnhookMe` example works:
 
