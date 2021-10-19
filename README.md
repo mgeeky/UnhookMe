@@ -5,6 +5,17 @@ In the era of intrusive AVs and EDRs that introduce hot-patches to the running p
 The solution I'm proposing here is to switch from using linker-resolved WinAPI imports, staying visibile in compiled executable's PE headers (Import Address Table specifically) to favor fully-dynamic approach insisting on resolving imports only in a dynamic fashion. Such dynamical resolver can be equipped with unhooking logic happening in the background, without any sort of guidance from the operator's side.
 
 
+### Simplest usage example
+
+This is how you can ensure to call `MessageBoxW` unhooked, unmonitored:
+
+```c++
+    RESOLVE(user32, MessageBoxW);
+    _MessageBoxW(0, L"Look Ma! I'm unhooked!", L"Third - Unhooked", 0);
+```
+
+All the magic happens within `RESOLVE` macrodefintion, that constructs `ImportResolver<T>` object named `_MessageBoxW`. 
+
 ### Showcase
 
 ![Unhookme showcase animation](https://raw.githubusercontent.com/mgeeky/UnhookMe/master/apimonitor.gif)
