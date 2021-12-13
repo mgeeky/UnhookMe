@@ -2516,7 +2516,6 @@ LPBYTE PE::MapFile()
     }
 
     _bIsFileMapped = true;
-    this->lpMapOfFile = lpMapOfFile;
 
     return (LPBYTE)lpMapOfFile;
 }
@@ -2648,7 +2647,7 @@ bool PE::AnalyseMemory(DWORD dwPID, LPBYTE dwAddress, size_t dwSize, bool readOn
     char fileName[MAX_PATH] = { 0 };
     strncpy_s(fileName, MAX_PATH, szFileName.c_str(), MAX_PATH);
 
-    GetModuleFileNameA(GetModuleHandle(nullptr), fileName, sizeof szFileName);
+    GetModuleFileNameA(GetModuleHandle(nullptr), fileName, szFileName.size());
     
     _filePath = std::wstring(&fileName[0], &fileName[strlen(fileName)]);
 
@@ -2812,7 +2811,7 @@ bool PE::AnalyseProcessModule(DWORD dwPID, HMODULE hModule, bool readOnly, bool 
 
         CloseHandle(hSnap);
 
-        auto err = ::GetLastError();
+        err = ::GetLastError();
         if (this->lpMapOfFile == nullptr)
         {
             RETURN_ERROR
@@ -3040,7 +3039,7 @@ bool PE::AnalyseProcessModule(DWORD dwPID, const std::string& szModule, bool rea
     if (!desiredModuleName.empty() && desiredModuleBaseAddress != nullptr && desiedModuleSize != 0)
     {
         auto a = std::wstring(desiredModuleName);
-        _filePath = desiredModuleName;
+        _filePath = std::move(desiredModuleName);
 
         szFileName = std::string(a.begin(), a.end());
 
