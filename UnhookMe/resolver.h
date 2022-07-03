@@ -247,27 +247,44 @@ namespace UnhookingImportResolver
     // instantiations per each function pointer type.
     extern ImportResolverCache<std::string> globalResolverCache;
 
-    template <typename Ret, typename ...Args>
+    template <typename Ret, typename ... Args>
     class ImportResolver <Ret WINAPI(Args...)>
     {
     public:
 
-        auto operator()(Args... args) { return call(args...); }
+        auto getAddress()       const { return resolvedFuncAddress; }
+        auto getModule()        const { return hModule; }
+        auto getDllName()       const { return dllName; }
+        auto getDllNameShort()  const { return dllNameShort; }
+        auto getFuncName()      const { return funcName; }
 
-		auto getAddress()       const { return resolvedFuncAddress; }
-		auto getModule()        const { return hModule; }
-		auto getDllName()       const { return dllName; }
-		auto getDllNameShort()  const { return dllNameShort; }
-		auto getFuncName()      const { return funcName; }
+        //auto operator()(Args... args) { return call(args...); }
+        //auto call(Args... args)
+
+        Ret operator()(Args... args)
+        {
+            auto test = ::GetModuleHandleA(dllName.c_str());
+            if (test == nullptr)
+            {
+                this->hModule = ::LoadLibraryA(dllName.c_str());
+                globalResolverCache.setCachedModuleBase(dllName, this->hModule);
+            }
+
+            //typedef Ret(WINAPI* funcType)(Args...);
+            //funcType func = reinterpret_cast<funcType>(resolvedFuncAddress);
+
+            auto func = reinterpret_cast<typename std::add_pointer_t<Ret WINAPI(Args...)>>(resolvedFuncAddress);
+            return func(args...);
+        }
 
         ImportResolver(
             std::string dllName,
             std::string funcName,
             bool _unhook = false,
-            bool *_wasItHooked = nullptr
+            bool* _wasItHooked = nullptr
         )
             : unhook(_unhook), wasItHooked(_wasItHooked),
-            hModule(nullptr), dllNameShort()
+            hModule(nullptr), dllNameShort("")
         {
             std::transform(dllName.begin(), dllName.end(), dllName.begin(),
                 [](unsigned char c) { return std::tolower(c); });
@@ -306,6 +323,15 @@ namespace UnhookingImportResolver
                 globalResolverCache.invalidateModule(dllName);
             }
 
+            if (IsProcessWow64())
+            {
+                // BUG: Hours of debugging led me to conclusion, that Resolver currently doesn't play very well
+                // on Wow64 processes (x86 processes running on top of x64 OS).
+                // 
+                // TODO: Until I get it sorted, need to remove unhooking logic for Wow64 :-(
+                this->unhook = false;
+            }
+
             assertLibraryLoaded();
 
             //
@@ -326,7 +352,9 @@ namespace UnhookingImportResolver
                 die();
             }
 
-            FARPROC func, funcOriginal = ::GetProcAddress(this->hModule, funcName.c_str());
+            FARPROC func;
+            this->funcOriginal = ::GetProcAddress(this->hModule, funcName.c_str());
+
             if (unhook)
             {
                 func = manualExportLookup();
@@ -389,18 +417,13 @@ namespace UnhookingImportResolver
 
             if (unhook)
             {
-                if(!checkIsAddressAvailable((uintptr_t)func))
+                if (!checkIsAddressAvailable((uintptr_t)func))
                 {
                     func = funcOriginal;
                     unhook = false;
                 }
 
-                if (func != funcOriginal)
-                {
-                    unhookImport(funcOriginal);
-                }
-
-                if(!unhookImport(func))
+                if (!unhookImport(func))
                 {
                 }
             }
@@ -454,7 +477,7 @@ namespace UnhookingImportResolver
                 }
             }
 
-            if(!this->hModule)
+            if (!this->hModule)
             {
                 bool loaded = false;
 
@@ -544,20 +567,9 @@ namespace UnhookingImportResolver
             }
         }
 
-        auto call(Args... args)
-        {
-            auto test = ::GetModuleHandleA(dllName.c_str());
-            if (test == nullptr)
-            {
-                this->hModule = ::LoadLibraryA(dllName.c_str());
-                globalResolverCache.setCachedModuleBase(dllName, this->hModule);
-            }
-
-            return reinterpret_cast<typename std::add_pointer_t<Ret WINAPI(Args...)>>(resolvedFuncAddress)(args...);
-        }
-
     private:
 
+        FARPROC funcOriginal;
         FARPROC resolvedFuncAddress;
         HINSTANCE hModule;
         std::string dllName;
@@ -565,7 +577,7 @@ namespace UnhookingImportResolver
         std::string funcName;
 
         bool unhook;
-        bool *wasItHooked;
+        bool* wasItHooked;
 
         inline std::wstring str_to_wstr(std::string input)
         {
@@ -580,7 +592,7 @@ namespace UnhookingImportResolver
             PE peModule;
             bool res = peModule.AnalyseProcessModule(0, hModule, true, true);
 
-            if(!res)
+            if (!res)
             {
                 return nullptr;
             }
@@ -622,7 +634,7 @@ namespace UnhookingImportResolver
                 auto path = split(dllName, std::string("\\"));
                 path.pop_back();
 
-                this->dllName.clear();
+                this->dllName = "";
                 for (auto p : path)
                 {
                     this->dllName += p + "\\";
@@ -635,7 +647,7 @@ namespace UnhookingImportResolver
                     auto _hModule = this->hModule;
 
                     this->dllNameShort = OBFI_ASCII("kernelbase.dll");
-                    this->dllName += this->dllNameShort;
+                    this->dllName = this->dllNameShort;
                     this->hModule = LoadLibraryA(this->dllNameShort.c_str());
 
                     auto out = manualExportLookup();
@@ -657,7 +669,7 @@ namespace UnhookingImportResolver
                     auto _dllName = this->dllName;
                     auto _hModule = this->hModule;
 
-                    this->dllNameShort = std::move(moduleFwd);
+                    this->dllNameShort = moduleFwd;
                     this->dllName += this->dllNameShort;
                     this->hModule = LoadLibraryA(this->dllNameShort.c_str());
 
@@ -675,11 +687,81 @@ namespace UnhookingImportResolver
                     return out;
                 }
             }
+            else
+            {
+                IMPORTED_FUNCTION importEntry;
+
+                if (peModule.getImport(this->funcName.c_str(), &importEntry))
+                {
+                    // Probably there is API SET redirection involved, example:
+                    // kernel32!CreateFileW -> jmp <api-ms-win-core-file-l1-1-0!CreateFileW> -> kernelbase.dll!CreateFileW
+
+                    if (importEntry.uImpDescriptorIndex >= 0 && importEntry.uImpDescriptorIndex < peModule.vImportDescriptors.size())
+                    {
+                        auto importDescriptor = peModule.vImportDescriptors[importEntry.uImpDescriptorIndex];
+                        auto moduleFwd = std::string(importDescriptor.szName);
+
+                        auto path = split(dllName, std::string("\\"));
+                        path.pop_back();
+
+                        this->dllName = "";
+                        for (auto p : path)
+                        {
+                            this->dllName += p + "\\";
+                        }
+
+                        if (moduleFwd.find(OBFI_ASCII("api-ms-win-core-"), 0) == 0)
+                        {
+                            auto _dllNameShort = this->dllNameShort;
+                            auto _dllName = this->dllName;
+                            auto _hModule = this->hModule;
+
+                            this->dllNameShort = OBFI_ASCII("kernelbase.dll");
+                            this->dllName += this->dllNameShort;
+                            this->hModule = LoadLibraryA(this->dllNameShort.c_str());
+
+                            auto out = manualExportLookup();
+                            if (!out)
+                            {
+                                this->dllNameShort = _dllNameShort;
+                                this->dllName = _dllName + _dllNameShort;
+                                this->hModule = _hModule;
+                                unhook = false;
+
+                                return ::GetProcAddress(_hModule, this->funcName.c_str());
+                            }
+
+                            return out;
+                        }
+                    }
+                }
+            }
 
             return reinterpret_cast<FARPROC>(resolved);
         }
 
-        
+        bool IsProcessWow64()
+        {
+            typedef BOOL(WINAPI* typeIsWow64Process) (HANDLE, PBOOL);
+            auto pIsWow64Process = (typeIsWow64Process)GetProcAddress(GetModuleHandleA("kernel32"), "IsWow64Process");
+
+            static BOOL bIsWow64 = FALSE;
+            static BOOL once = false;
+
+            if (once) return bIsWow64;
+
+            if (pIsWow64Process != nullptr)
+            {
+                if (!pIsWow64Process(GetCurrentProcess(), &bIsWow64))
+                {
+                    //return false;
+                }
+            }
+
+            once = true;
+            return bIsWow64;
+        }
+
 
         bool flipPageGuards(bool disable, uintptr_t hModule, std::vector<MEMORY_BASIC_INFORMATION>* guardedAllocs)
         {
@@ -737,7 +819,7 @@ namespace UnhookingImportResolver
             {
                 if (guardedAllocs != nullptr && guardedAllocs->size() > 0)
                 {
-                    for (const auto &mbi : *guardedAllocs)
+                    for (const auto& mbi : *guardedAllocs)
                     {
                         DWORD oldProtect = 0;
                         VirtualProtect(mbi.BaseAddress, mbi.RegionSize, mbi.Protect, &oldProtect);
@@ -750,6 +832,8 @@ namespace UnhookingImportResolver
 
         bool unhookImport(FARPROC funcAddress)
         {
+            if (!this->unhook) return true;
+
             const size_t Max_Bytes_Of_Function_To_Check = 32;
 
             uint8_t currentImportStub[Max_Bytes_Of_Function_To_Check] = { 0 };
@@ -759,6 +843,11 @@ namespace UnhookingImportResolver
 
             PE peLibraryFile;
             if (!peLibraryFile.AnalyseFile(dllName, true))
+            {
+                return false;
+            }
+
+            if (!peLibraryFile.ApplyAllRelocs((ULONGLONG)this->hModule))
             {
                 return false;
             }
@@ -888,8 +977,8 @@ namespace UnhookingImportResolver
                 DWORD old, old2;
                 if (VirtualProtect(funcAddress, Max_Bytes_Of_Function_To_Check, PAGE_EXECUTE_READWRITE, &old))
                 {
-                    if (peLibraryFile.ApplyRelocsInBuffer(reinterpret_cast<ULONGLONG>(hModule), 
-                        exportEntry.dwThunkRVA, inFileImportStub, Max_Bytes_Of_Function_To_Check))
+                    //if (peLibraryFile.ApplyRelocsInBuffer(reinterpret_cast<ULONGLONG>(hModule), 
+                    //    exportEntry.dwThunkRVA, inFileImportStub, Max_Bytes_Of_Function_To_Check))
                     {
                         for (size_t u = 0; u < Max_Bytes_Of_Function_To_Check; u++)
                         {

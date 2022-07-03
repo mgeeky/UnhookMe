@@ -377,6 +377,7 @@ public:
     // Simple wrapper to _AnalyseProcessModule for quick process analysis
     bool AnalyseProcess(DWORD dwPID, bool readOnly) { return this->AnalyseProcessModule(dwPID, "", readOnly); }
 
+    bool ApplyAllRelocs(ULONGLONG newImageBase = 0);
     bool ApplyRelocsInBuffer(ULONGLONG newBase, ULONGLONG bufferRVA, uint8_t *buffer, size_t sizeOfBuffer, ULONGLONG oldImageBase = 0);
 
     // This function actually opens the file, gathers headers from file, performs IAT parsing, and
@@ -487,7 +488,6 @@ private:
     void AddNewSection(size_t sizeOfSection, DWORD flags, const std::string& szSectionName);
     bool AppendShellcode(BYTE* whereToReturn, uint8_t *shellcode, size_t sizeOfShellcode, __IMAGE_SECTION_HEADER *imgNewSection);
 
-    bool ApplyAllRelocs(ULONGLONG newImageBase);
 	DWORD GetSafeSectionSize(const __IMAGE_SECTION_HEADER& sect) const;
 
     bool _OpenFile();
